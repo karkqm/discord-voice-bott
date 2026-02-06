@@ -1,5 +1,4 @@
 @echo off
-chcp 65001 >nul
 title Discord Voice Bot - Setup
 
 echo ============================================
@@ -7,132 +6,133 @@ echo   Discord Voice Bot - Auto Setup
 echo ============================================
 echo.
 
-:: Проверяем Python
+:: Check Python
 where py >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [!] Python не найден. Устанавливаю Python 3.11...
+    echo [!] Python not found. Installing Python 3.11...
     winget install Python.Python.3.11 --accept-package-agreements --accept-source-agreements
     if %errorlevel% neq 0 (
-        echo [X] Не удалось установить Python. Установи вручную: https://www.python.org/downloads/
+        echo [X] Failed to install Python. Install manually: https://www.python.org/downloads/
         pause
         exit /b 1
     )
-    echo [OK] Python 3.11 установлен. Перезапусти терминал и запусти setup.bat снова.
+    echo [OK] Python 3.11 installed. Restart terminal and run setup.bat again.
     pause
     exit /b 0
 )
 
-echo [OK] Python найден
+echo [OK] Python found
 py --version
 echo.
 
-:: Проверяем ffmpeg
+:: Check ffmpeg
 where ffmpeg >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [!] ffmpeg не найден. Устанавливаю...
+    echo [!] ffmpeg not found. Installing...
     winget install Gyan.FFmpeg --accept-package-agreements --accept-source-agreements
     if %errorlevel% neq 0 (
-        echo [!] Не удалось установить ffmpeg через winget.
-        echo     Скачай вручную: https://ffmpeg.org/download.html
+        echo [!] Failed to install ffmpeg via winget.
+        echo     Download manually: https://ffmpeg.org/download.html
     ) else (
-        echo [OK] ffmpeg установлен
+        echo [OK] ffmpeg installed
     )
 ) else (
-    echo [OK] ffmpeg найден
+    echo [OK] ffmpeg found
 )
 echo.
 
-:: Создаём venv
+:: Create venv
 if not exist "venv" (
-    echo [*] Создаю виртуальное окружение...
-    py -3.11 -m venv venv 2>nul || py -m venv venv
-    echo [OK] venv создан
+    echo [*] Creating virtual environment...
+    py -3.11 -m venv venv 2>nul
+    if %errorlevel% neq 0 (
+        py -m venv venv
+    )
+    echo [OK] venv created
 ) else (
-    echo [OK] venv уже существует
+    echo [OK] venv already exists
 )
 echo.
 
-:: Активируем venv
+:: Activate venv
 call venv\Scripts\activate.bat
 
-:: Обновляем pip
-echo [*] Обновляю pip...
+:: Upgrade pip
+echo [*] Upgrading pip...
 python -m pip install --upgrade pip --quiet
 echo.
 
-:: Определяем GPU
-echo [*] Определяю видеокарту...
+:: Detect GPU
+echo [*] Detecting GPU...
 set HAS_NVIDIA=0
 nvidia-smi >nul 2>&1
 if %errorlevel% equ 0 (
     set HAS_NVIDIA=1
-    echo [OK] NVIDIA GPU найден
+    echo [OK] NVIDIA GPU detected
     nvidia-smi --query-gpu=name --format=csv,noheader
 ) else (
-    echo [i] NVIDIA GPU не найден, используем CPU/DirectML
+    echo [i] No NVIDIA GPU found, using CPU/DirectML
 )
 echo.
 
-:: Устанавливаем PyTorch
-if %HAS_NVIDIA%==1 (
-    echo [*] Устанавливаю PyTorch с CUDA...
+:: Install PyTorch
+if "%HAS_NVIDIA%"=="1" (
+    echo [*] Installing PyTorch with CUDA...
     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 --quiet
     pip install nvidia-cublas-cu12 nvidia-cudnn-cu12 --quiet
-    echo [OK] PyTorch CUDA установлен
+    echo [OK] PyTorch CUDA installed
 ) else (
-    echo [*] Устанавливаю PyTorch CPU...
+    echo [*] Installing PyTorch CPU...
     pip install torch torchvision torchaudio --quiet
-    echo [OK] PyTorch CPU установлен
+    echo [OK] PyTorch CPU installed
 )
 echo.
 
-:: Устанавливаем основные зависимости
-echo [*] Устанавливаю зависимости...
+:: Install main dependencies
+echo [*] Installing dependencies...
 pip install -r requirements.txt --quiet
-echo [OK] Основные зависимости установлены
+echo [OK] Dependencies installed
 echo.
 
-:: Устанавливаем edge-tts
-echo [*] Устанавливаю edge-tts...
+:: Install edge-tts
+echo [*] Installing edge-tts...
 pip install edge-tts --quiet
-echo [OK] edge-tts установлен
+echo [OK] edge-tts installed
 echo.
 
-:: Для AMD GPU — onnx-asr + DirectML
-if %HAS_NVIDIA%==0 (
-    echo [*] Устанавливаю onnx-asr + DirectML (для AMD GPU)...
+:: For AMD GPU - onnx-asr + DirectML
+if "%HAS_NVIDIA%"=="0" (
+    echo [*] Installing onnx-asr + DirectML for AMD GPU...
     pip install onnx-asr[hub] onnxruntime-directml --quiet
-    echo [OK] onnx-asr + DirectML установлены
+    echo [OK] onnx-asr + DirectML installed
     echo.
 )
 
-:: Создаём .env если нет
+:: Create .env if missing
 if not exist ".env" (
-    echo [*] Создаю .env из .env.example...
+    echo [*] Creating .env from .env.example...
     copy .env.example .env >nul
-    echo [!] Отредактируй .env - впиши свой DISCORD_BOT_TOKEN и OPENAI_API_KEY
+    echo [!] Edit .env - set your DISCORD_BOT_TOKEN and OPENAI_API_KEY
     echo.
-    
-    :: Автоматически выбираем STT backend
-    if %HAS_NVIDIA%==1 (
-        echo [i] NVIDIA GPU найден - рекомендуется STT_BACKEND=realtime
-        echo     Для лучшего качества: STT_MODEL=large-v3
-        echo     Для быстрого старта: STT_MODEL=base
+    if "%HAS_NVIDIA%"=="1" (
+        echo [i] NVIDIA GPU detected - recommended: STT_BACKEND=realtime
+        echo     Best quality: STT_MODEL=large-v3
+        echo     Fast start:   STT_MODEL=base
     ) else (
-        echo [i] Нет NVIDIA - рекомендуется STT_BACKEND=onnx
+        echo [i] No NVIDIA - recommended: STT_BACKEND=onnx
         echo     STT_MODEL=onnx-community/whisper-base
     )
 ) else (
-    echo [OK] .env уже существует
+    echo [OK] .env already exists
 )
 echo.
 
 echo ============================================
-echo   Установка завершена!
+echo   Setup complete!
 echo ============================================
 echo.
-echo   Следующие шаги:
-echo   1. Отредактируй .env (токены)
-echo   2. Запусти: run.bat
+echo   Next steps:
+echo   1. Edit .env (add your tokens)
+echo   2. Run: run.bat
 echo.
 pause
