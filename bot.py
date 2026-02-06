@@ -8,7 +8,10 @@ from discord.ext import commands
 
 from config import Config
 from modules.voice_receiver import RealtimeSink
-from modules.stt_engine import STTEngine
+if Config().STT_BACKEND == "realtime":
+    from modules.stt_engine_v2 import STTEngine
+else:
+    from modules.stt_engine import STTEngine
 from modules.llm_engine import LLMEngine
 from modules.tts_engine import TTSEngine
 from modules.voice_player import VoicePlayer

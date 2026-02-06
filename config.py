@@ -17,8 +17,10 @@ class Config:
     LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "150"))
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.9"))
 
-    # STT (RealtimeSTT)
-    STT_MODEL: str = os.getenv("STT_MODEL", "base")
+    # STT
+    # STT_BACKEND: "onnx" (onnx-asr + DirectML/AMD) или "realtime" (RealtimeSTT + CUDA/NVIDIA)
+    STT_BACKEND: str = os.getenv("STT_BACKEND", "onnx")
+    STT_MODEL: str = os.getenv("STT_MODEL", "onnx-community/whisper-base")
     STT_LANGUAGE: str = os.getenv("STT_LANGUAGE", "ru")
 
     # TTS (RealtimeTTS)
