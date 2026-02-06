@@ -1,0 +1,275 @@
+import asyncio
+import threading
+import time
+from typing import Optional
+
+import discord
+from discord.ext import commands
+
+from config import Config
+from modules.voice_receiver import RealtimeSink
+from modules.stt_engine import STTEngine
+from modules.llm_engine import LLMEngine
+from modules.tts_engine import TTSEngine
+from modules.voice_player import VoicePlayer
+from modules.screen_capture import ScreenCapture
+from modules.conversation import Conversation
+from utils.logger import setup_logger
+
+log = setup_logger("bot")
+
+config = Config()
+
+# --- Discord Bot Setup ---
+intents = discord.Intents.default()
+intents.message_content = True
+intents.voice_states = True
+intents.guilds = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# --- Module Instances ---
+conversation = Conversation(config)
+llm_engine = LLMEngine(config)
+tts_engine = TTSEngine(
+    engine=config.TTS_ENGINE,
+    voice=config.TTS_VOICE,
+)
+voice_player = VoicePlayer()
+screen_capture = ScreenCapture(
+    interval=config.SCREEN_CAPTURE_INTERVAL,
+)
+
+# STT создаётся позже, т.к. нужны колбэки
+stt_engine: Optional[STTEngine] = None
+
+# Флаг обработки (чтобы не обрабатывать параллельно)
+_processing_lock = asyncio.Lock()
+
+
+# --- Callbacks ---
+
+def on_stt_text_ready(text: str, user_id: int) -> None:
+    """Колбэк: STT распознал финальный текст от пользователя."""
+    log.info(f"Speech recognized from {user_id}: {text}")
+    # Запускаем обработку в event loop бота
+    asyncio.run_coroutine_threadsafe(
+        handle_user_speech(text, user_id),
+        bot.loop,
+    )
+
+
+def on_voice_audio_chunk(audio_data: bytes, user_id: int) -> None:
+    """Колбэк: аудио-чанк от пользователя в реальном времени — подаём в STT."""
+    if stt_engine:
+        stt_engine.feed_audio(audio_data, user_id)
+
+
+def on_screen_frame_ready(frame_b64: str) -> None:
+    """Колбэк: новый кадр экрана захвачен."""
+    if conversation.should_comment_screen():
+        asyncio.run_coroutine_threadsafe(
+            handle_screen_comment(frame_b64),
+            bot.loop,
+        )
+
+
+async def handle_user_speech(text: str, user_id: int) -> None:
+    """Обрабатывает распознанную речь пользователя."""
+    try:
+        async with _processing_lock:
+            log.info(f"[PIPELINE] Processing speech from {user_id}: {text}")
+            user_name = f"User_{user_id}"
+            for guild in bot.guilds:
+                member = guild.get_member(user_id)
+                if member:
+                    user_name = member.display_name
+                    break
+
+            conversation.add_user_message(text, user_name)
+
+            await generate_and_speak(
+                include_screen=screen_capture.last_frame is not None
+            )
+            log.info("[PIPELINE] Speech processing complete")
+    except Exception as e:
+        log.error(f"[PIPELINE] handle_user_speech error: {e}", exc_info=True)
+
+
+async def handle_screen_comment(frame_b64: str) -> None:
+    """Генерирует комментарий к экрану."""
+    async with _processing_lock:
+        messages = conversation.get_messages(include_screen=True)
+        await generate_and_speak(
+            image_base64=frame_b64,
+            include_screen=True,
+        )
+
+
+async def generate_and_speak(
+    image_base64: Optional[str] = None,
+    include_screen: bool = False,
+) -> None:
+    """Генерирует ответ LLM стримом и озвучивает каждое предложение сразу."""
+    try:
+        messages = conversation.get_messages(include_screen=include_screen)
+        log.info(f"[PIPELINE] generate_and_speak: {len(messages)} messages")
+
+        screen_frame = image_base64 or (
+            screen_capture.last_frame if include_screen else None
+        )
+
+        full_response = ""
+        log.info("[PIPELINE] Starting LLM stream...")
+
+        async for sentence in llm_engine.generate_stream(messages, screen_frame):
+            full_response += " " + sentence
+            log.info(f"[PIPELINE] LLM sentence: {sentence}")
+
+            if not tts_engine._ready:
+                log.warning("[PIPELINE] TTS not ready yet, skipping")
+                continue
+
+            # Синтезируем и воспроизводим каждое предложение сразу
+            audio_data = await tts_engine.synthesize(sentence)
+            if audio_data:
+                log.info(f"[PIPELINE] Playing {len(audio_data)} bytes")
+                await voice_player.play_audio(audio_data)
+
+        if full_response.strip():
+            conversation.add_bot_message(full_response.strip())
+        log.info(f"[PIPELINE] Done. Response: {full_response.strip()[:80]}...")
+
+    except Exception as e:
+        log.error(f"[PIPELINE] generate_and_speak error: {e}", exc_info=True)
+
+
+# --- Discord Events ---
+
+@bot.event
+async def on_ready():
+    log.info(f"Bot logged in as {bot.user} (ID: {bot.user.id})")
+    log.info(f"Connected to {len(bot.guilds)} guild(s)")
+
+    global stt_engine
+
+    # LLM — лёгкий, можно синхронно
+    llm_engine.start()
+
+    # TTS и STT — тяжёлые, запускаем в фоне (не блокируют event loop)
+    tts_engine.start()
+
+    stt_engine = STTEngine(
+        model=config.STT_MODEL,
+        language=config.STT_LANGUAGE,
+        on_text_ready=on_stt_text_ready,
+    )
+    stt_engine.start()
+
+    log.info("Bot ready! TTS and STT loading in background...")
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    """Обрабатывает текстовые сообщения."""
+    if message.author == bot.user:
+        return
+
+    # Обрабатываем команды
+    await bot.process_commands(message)
+
+
+
+# --- Slash / Prefix Commands ---
+
+@bot.command(name="join", aliases=["j"])
+async def join_voice(ctx: commands.Context):
+    """Подключает бота к голосовому каналу."""
+    if not ctx.author.voice:
+        await ctx.send("Ты не в голосовом канале!")
+        return
+
+    channel = ctx.author.voice.channel
+    await voice_player.connect(channel)
+
+    # Начинаем слушать голос через кастомный RealtimeSink
+    vc = voice_player.voice_client
+    if vc:
+        sink = RealtimeSink(on_audio_chunk=on_voice_audio_chunk, bot_user_id=bot.user.id)
+        vc.start_recording(sink, _on_recording_done, ctx.channel)
+        log.info("Started realtime audio recording")
+
+    await ctx.send(f"Подключился к **{channel.name}**! 🎤")
+    log.info(f"Joined voice channel: {channel.name}")
+
+
+@bot.command(name="leave", aliases=["l"])
+async def leave_voice(ctx: commands.Context):
+    """Отключает бота от голосового канала."""
+    vc = voice_player.voice_client
+    if vc and vc.recording:
+        vc.stop_recording()
+    screen_capture.stop()
+    await voice_player.disconnect()
+    conversation.clear()
+    await ctx.send("Отключился! 👋")
+
+
+@bot.command(name="screen", aliases=["s"])
+async def toggle_screen(ctx: commands.Context):
+    """Включает/выключает анализ демонстрации экрана."""
+    if screen_capture.is_running:
+        screen_capture.stop()
+        await ctx.send("Анализ экрана выключен.")
+    else:
+        screen_capture.start()
+        await ctx.send(
+            f"Анализ экрана включён (каждые {config.SCREEN_CAPTURE_INTERVAL}с). "
+            "Начни демонстрацию экрана в Discord!"
+        )
+
+
+@bot.command(name="clear", aliases=["c"])
+async def clear_history(ctx: commands.Context):
+    """Очищает историю диалога."""
+    conversation.clear()
+    await ctx.send("История диалога очищена! 🧹")
+
+
+@bot.command(name="status")
+async def show_status(ctx: commands.Context):
+    """Показывает статус бота."""
+    status_lines = [
+        f"**{config.BOT_NAME}** — статус",
+        f"• LLM: `{config.LLM_MODEL}`",
+        f"• STT: RealtimeSTT (`{config.STT_MODEL}`)",
+        f"• TTS: RealtimeTTS (`{config.TTS_ENGINE}` / `{config.TTS_VOICE}`)",
+        f"• Голосовой канал: {'✅ подключён' if voice_player.voice_client else '❌ нет'}",
+        f"• Анализ экрана: {'✅ вкл' if screen_capture.is_running else '❌ выкл'}",
+        f"• История: {conversation.history_length} сообщений",
+    ]
+    await ctx.send("\n".join(status_lines))
+
+
+async def _on_recording_done(sink, channel):
+    """Колбэк: запись завершена (вызывается при stop_recording)."""
+    log.info("Recording stopped")
+
+
+# --- Entry Point ---
+
+def main():
+    if not config.DISCORD_BOT_TOKEN:
+        log.error("DISCORD_BOT_TOKEN not set! Copy .env.example to .env and fill in your token.")
+        return
+    if not config.OPENAI_API_KEY:
+        log.error("OPENAI_API_KEY not set! Copy .env.example to .env and fill in your key.")
+        return
+
+    log.info(f"Starting {config.BOT_NAME}...")
+    bot.run(config.DISCORD_BOT_TOKEN)
+
+
+if __name__ == "__main__":
+    main()
