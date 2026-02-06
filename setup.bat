@@ -41,6 +41,22 @@ if %errorlevel% neq 0 (
 )
 echo.
 
+:: Check mpv (needed by RealtimeTTS)
+where mpv >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [!] mpv not found. Installing...
+    winget install mpv.net --accept-package-agreements --accept-source-agreements
+    if %errorlevel% neq 0 (
+        echo [!] Failed to install mpv via winget.
+        echo     Download manually: https://mpv.io/
+    ) else (
+        echo [OK] mpv installed
+    )
+) else (
+    echo [OK] mpv found
+)
+echo.
+
 :: Create venv
 if not exist "venv" (
     echo [*] Creating virtual environment...
