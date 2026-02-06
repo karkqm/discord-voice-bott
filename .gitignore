@@ -1,4 +1,43 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# Secrets
 .env
+
+# Logs
+*.log
+
+# Models & heavy files
+models/
+*.pth
+*.pt
+*.bin
+*.onnx
+*.safetensors
+
+# Binaries
+*.exe
+*.dll
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temp
+*.tmp
+*.wav
+*.mp3
