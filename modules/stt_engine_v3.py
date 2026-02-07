@@ -118,7 +118,12 @@ class STTEngine:
                 device="cuda",
                 compute_type="float16",
             )
-            log.info(f"Whisper '{self.model_name}' loaded — STT fully ready")
+            log.info(f"Whisper '{self.model_name}' loaded, warming up...")
+            
+            # Прогрев Whisper (первый вызов на CUDA ~10s, последующие ~200ms)
+            dummy = np.zeros(VAD_SAMPLE_RATE, dtype=np.float32)  # 1s тишины
+            self._whisper_model.transcribe(dummy, language=self.language, beam_size=1, best_of=1, vad_filter=False)
+            log.info("Whisper warmed up — STT fully ready")
             
             self._transcribe_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stt")
             self._ready = True
