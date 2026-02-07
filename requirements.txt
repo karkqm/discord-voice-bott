@@ -3,6 +3,7 @@ openai>=1.40.0
 python-dotenv>=1.0.0
 RealtimeSTT>=0.3.0
 torch>=2.0.0
+silero-tts>=0.0.5
 omegaconf>=2.3.0
 PyNaCl>=1.5.0
 Pillow>=10.0.0

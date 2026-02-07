@@ -74,33 +74,25 @@ class TTSEngine:
             
             log.info(f"Loading Silero TTS v4 on {self._device}...")
             
-            # Download model directly via torch.package (more reliable than torch.hub)
-            import os
-            model_dir = os.path.join(os.path.expanduser("~"), ".cache", "silero_tts")
-            os.makedirs(model_dir, exist_ok=True)
-            model_path = os.path.join(model_dir, "v4_ru.pt")
+            from silero_tts.silero_tts import SileroTTS
             
-            if not os.path.exists(model_path):
-                log.info("Downloading Silero TTS v4_ru model...")
-                torch.hub.download_url_to_file(
-                    "https://models.silero.ai/models/tts/ru/v4_ru.pt",
-                    model_path
-                )
-                log.info(f"Model downloaded to {model_path}")
-            else:
-                log.info(f"Using cached model: {model_path}")
+            self._silero = SileroTTS(
+                model_id='v4_ru',
+                language='ru',
+                speaker=self.voice,
+                sample_rate=SILERO_SAMPLE_RATE,
+                device=self._device,
+            )
+            self._model = self._silero  # for compatibility
             
-            self._model = torch.package.PackageImporter(model_path).load_pickle("tts_models", "model")
-            self._model = self._model.to(self._device)
-            
-            log.info(f"Model loaded: type={type(self._model)}, has apply_tts={hasattr(self._model, 'apply_tts')}")
-            
-            if not hasattr(self._model, 'apply_tts'):
-                raise RuntimeError(f"Silero model has no apply_tts method. Type: {type(self._model)}")
+            log.info(f"Silero TTS initialized: model=v4_ru, speaker={self.voice}, device={self._device}")
             
             # Прогрев модели
             log.info("Warming up TTS model...")
-            _ = self._model.apply_tts(text="Привет.", speaker=self.voice, sample_rate=SILERO_SAMPLE_RATE)
+            import tempfile, os
+            warmup_path = os.path.join(tempfile.gettempdir(), "silero_warmup.wav")
+            self._silero.tts("Привет.", warmup_path)
+            os.remove(warmup_path)
             
             self._ready = True
             log.info(f"TTS engine ready (Silero v4, voice={self.voice}, device={self._device})")
@@ -127,19 +119,24 @@ class TTSEngine:
                 self._is_speaking = True
                 t0 = time.time()
                 
-                audio_tensor = self._model.apply_tts(
-                    text=text,
-                    speaker=self.voice,
-                    sample_rate=SILERO_SAMPLE_RATE,
-                )
+                # Synthesize to temp WAV, then read PCM
+                import tempfile, os, wave
+                tmp_path = os.path.join(tempfile.gettempdir(), f"silero_tts_{threading.get_ident()}.wav")
+                self._silero.tts(text, tmp_path)
                 
                 elapsed = time.time() - t0
                 
-                # Конвертируем tensor -> int16 PCM bytes
-                audio_np = audio_tensor.cpu().numpy()
-                # Silero выдаёт float32 [-1, 1] -> int16
-                pcm_int16 = (audio_np * 32767).astype(np.int16)
-                pcm_bytes = pcm_int16.tobytes()
+                # Read WAV -> PCM int16
+                with wave.open(tmp_path, 'rb') as wf:
+                    pcm_bytes = wf.readframes(wf.getnframes())
+                    actual_sr = wf.getframerate()
+                
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+                
+                pcm_int16 = np.frombuffer(pcm_bytes, dtype=np.int16)
                 
                 duration = len(pcm_int16) / SILERO_SAMPLE_RATE
                 log.info(f"TTS synthesized: {text[:40]}... ({elapsed:.2f}s synth, {duration:.1f}s audio)")
