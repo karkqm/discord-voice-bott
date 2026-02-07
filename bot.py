@@ -167,10 +167,19 @@ async def _generate_response_loop() -> None:
     
     while True:
         _pending_response = False
-        await generate_and_speak(
-            include_screen=screen_capture.last_frame is not None,
-            include_minecraft=minecraft_bot.is_running if minecraft_bot else False
-        )
+        try:
+            await asyncio.wait_for(
+                generate_and_speak(
+                    include_screen=screen_capture.last_frame is not None,
+                    include_minecraft=minecraft_bot.is_running if minecraft_bot else False
+                ),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            log.warning(f"{RED}[TIMEOUT] LLM не ответил за 30с, пропускаю{RESET}")
+        except asyncio.CancelledError:
+            log.info("Generation cancelled (shut up)")
+            return
         
         # После ответа проверяем: накопились ли новые сообщения?
         if _pending_response:

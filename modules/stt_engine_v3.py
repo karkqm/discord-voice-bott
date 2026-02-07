@@ -232,8 +232,11 @@ class STTEngine:
             return
         
         # Отправляем в пул транскрипции
-        if self._transcribe_pool:
-            self._transcribe_pool.submit(self._transcribe, audio_data, user_id, speech_start)
+        if self._transcribe_pool and self._running:
+            try:
+                self._transcribe_pool.submit(self._transcribe, audio_data, user_id, speech_start)
+            except RuntimeError:
+                pass  # пул уже закрыт
 
     def _transcribe(self, audio_data: bytes, user_id: int, speech_start: float) -> None:
         """Транскрибирует аудио через faster-whisper (вызывается из пула)."""
@@ -333,6 +336,9 @@ class STTEngine:
         """Останавливает STT движок."""
         self._running = False
         self._ready = False
+        # Даём _silence_monitor время остановиться
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=1.0)
         if self._transcribe_pool:
             self._transcribe_pool.shutdown(wait=False)
             self._transcribe_pool = None
