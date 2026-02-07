@@ -77,12 +77,16 @@ class LLMEngine:
             })
 
         try:
-            stream = await self._client.chat.completions.create(
-                model=self.config.LLM_MODEL,
-                messages=request_messages,
-                max_tokens=self.config.LLM_MAX_TOKENS,
-                temperature=self.config.LLM_TEMPERATURE,
-                stream=True,
+            stream = await asyncio.wait_for(
+                self._client.chat.completions.create(
+                    model=self.config.LLM_MODEL,
+                    messages=request_messages,
+                    max_tokens=self.config.LLM_MAX_TOKENS,
+                    temperature=self.config.LLM_TEMPERATURE,
+                    stream=True,
+                    timeout=15.0,
+                ),
+                timeout=15.0,
             )
 
             buffer = ""
