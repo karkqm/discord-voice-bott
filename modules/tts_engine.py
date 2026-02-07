@@ -93,6 +93,13 @@ class TTSEngine:
             
             log.info(f"Loading Silero TTS v4 on {self._device}...")
             
+            # Подавляем loguru спам от silero_tts
+            try:
+                from loguru import logger as loguru_logger
+                loguru_logger.disable("silero_tts")
+            except ImportError:
+                pass
+            
             from silero_tts.silero_tts import SileroTTS
             
             self._silero = SileroTTS(

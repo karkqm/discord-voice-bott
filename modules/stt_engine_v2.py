@@ -5,6 +5,7 @@
 """
 
 import threading
+import time
 from typing import Callable, Optional
 
 from utils.logger import setup_logger
@@ -35,6 +36,7 @@ class STTEngine:
         self._current_user_id: int = 0
         self._lock = threading.Lock()
         self._running = False
+        self._speech_start_time: float = 0.0  # когда началась речь
 
     def start(self) -> None:
         """Запускает инициализацию RealtimeSTT в фоновом потоке."""
@@ -84,6 +86,7 @@ class STTEngine:
             return
 
         text = text.strip()
+        t_recognized = time.time()
 
         if len(text) < 3:
             return
@@ -97,13 +100,14 @@ class STTEngine:
             "thank you for watching", "you", "the",
         }
         if any(g in text.lower() for g in garbage):
-            log.debug(f"STT filtered (garbage): {text}")
             return
 
         with self._lock:
             user_id = self._current_user_id
 
-        log.info(f"STT [{user_id}]: {text}")
+        # Время распознавания
+        stt_ms = (t_recognized - self._speech_start_time) * 1000 if self._speech_start_time > 0 else 0
+        log.info(f"[{user_id}] ({stt_ms:.0f}ms) {text}")
 
         if self.on_text_ready:
             try:
@@ -134,6 +138,7 @@ class STTEngine:
 
     def _on_recording_start_wrapper(self):
         """Колбэк: началась запись (обнаружена речь)."""
+        self._speech_start_time = time.time()
         if self.on_speech_begin:
             try:
                 self.on_speech_begin()

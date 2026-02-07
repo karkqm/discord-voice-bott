@@ -113,7 +113,6 @@ class VoicePlayer:
             else:
                 # Если молчит или играло что-то другое — запускаем новый стрим
                 self.stop() # на всякий случай
-                log.info("Starting new audio stream")
                 self._current_source = PCMStreamAudioSource()
                 self._current_source.add_data(pcm_48k)
                 self._voice_client.play(self._current_source, after=self._after_playback)

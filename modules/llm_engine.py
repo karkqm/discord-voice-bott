@@ -77,7 +77,6 @@ class LLMEngine:
             })
 
         try:
-            log.debug(f"LLM request: model={self.config.LLM_MODEL}, msgs={len(request_messages)}")
             stream = await self._client.chat.completions.create(
                 model=self.config.LLM_MODEL,
                 messages=request_messages,
@@ -85,12 +84,7 @@ class LLMEngine:
                 temperature=self.config.LLM_TEMPERATURE,
                 stream=True,
             )
-            log.debug("LLM stream created, reading chunks...")
 
-            import time
-            t0 = time.time()
-            first_yield = True
-            
             buffer = ""
             # Split on sentence enders AND commas for faster first audio
             sentence_enders = {".", "!", "?", "…", "\n"}
@@ -122,19 +116,12 @@ class LLMEngine:
                             sentence = buffer[: split_pos + 1].strip()
                             buffer = buffer[split_pos + 1 :]
                             if sentence:
-                                if first_yield:
-                                    elapsed = time.time() - t0
-                                    log.info(f"LLM first fragment in {elapsed:.2f}s: {sentence}")
-                                    first_yield = False
                                 yield sentence
                         else:
                             break
 
             if buffer.strip():
                 yield buffer.strip()
-
-            total = time.time() - t0
-            log.info(f"LLM stream complete in {total:.2f}s")
 
         except Exception as e:
             log.error(f"LLM generation error: {e}", exc_info=True)
