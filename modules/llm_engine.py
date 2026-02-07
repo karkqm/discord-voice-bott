@@ -18,25 +18,31 @@ class LLMEngine:
     def __init__(self, config: Config):
         self.config = config
         self._client: Optional[AsyncOpenAI] = None
+        self._api_key: str = ""
+        self._base_url: Optional[str] = None
+
+    def _create_client(self) -> AsyncOpenAI:
+        """Создаёт новый httpx клиент. Вызывается при старте и после ошибок."""
+        return AsyncOpenAI(
+            api_key=self._api_key,
+            base_url=self._base_url,
+            timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0),
+            max_retries=0,
+        )
 
     def start(self) -> None:
-        api_key = self.config.OPENAI_API_KEY
-        base_url = self.config.OPENAI_BASE_URL
+        self._api_key = self.config.OPENAI_API_KEY or ""
+        self._base_url = self.config.OPENAI_BASE_URL or None
 
-        if not api_key and not base_url:
+        if not self._api_key and not self._base_url:
              log.warning("No OPENAI_API_KEY or OPENAI_BASE_URL set. LLM might fail.")
 
         # Для локальных LLM ключ может быть любым, но не пустым
-        if self.config.IS_LOCAL_LLM and not api_key:
-            api_key = "local"
+        if self.config.IS_LOCAL_LLM and not self._api_key:
+            self._api_key = "local"
 
-        self._client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url if base_url else None,
-            timeout=httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=10.0),
-            max_retries=0,
-        )
-        log.info(f"LLM engine started (model={self.config.LLM_MODEL}, base_url={base_url}, local={self.config.IS_LOCAL_LLM})")
+        self._client = self._create_client()
+        log.info(f"LLM engine started (model={self.config.LLM_MODEL}, base_url={self._base_url}, local={self.config.IS_LOCAL_LLM})")
 
     def stop(self) -> None:
         self._client = None
@@ -81,20 +87,20 @@ class LLMEngine:
             })
 
         stream = None
+        error_occurred = False
 
         try:
             t0 = time.time()
             log.debug("[LLM] Sending request...")
             
-            stream = await asyncio.wait_for(
-                self._client.chat.completions.create(
-                    model=self.config.LLM_MODEL,
-                    messages=request_messages,
-                    max_tokens=self.config.LLM_MAX_TOKENS,
-                    temperature=self.config.LLM_TEMPERATURE,
-                    stream=True,
-                ),
-                timeout=25.0,  # 25с — cold start до 18с + запас
+            # Не используем asyncio.wait_for — httpx сам обрабатывает таймауты
+            # connect=10s, read=30s — достаточно для cold start (до 18с)
+            stream = await self._client.chat.completions.create(
+                model=self.config.LLM_MODEL,
+                messages=request_messages,
+                max_tokens=self.config.LLM_MAX_TOKENS,
+                temperature=self.config.LLM_TEMPERATURE,
+                stream=True,
             )
             
             t_connect = time.time() - t0
@@ -133,18 +139,19 @@ class LLMEngine:
             if buffer.strip():
                 yield buffer.strip()
 
-        except asyncio.TimeoutError:
-            log.warning("LLM API timeout (25s)")
         except Exception as e:
-            log.error(f"LLM generation error: {e}")
+            error_occurred = True
+            log.warning(f"LLM error: {e}")
         finally:
-            # Всегда закрываем стрим чтобы освободить HTTP соединение
             if stream is not None:
                 try:
                     await stream.close()
-                    log.debug("[LLM] Stream closed")
                 except Exception:
                     pass
+            # После любой ошибки — пересоздаём клиент (сбрасываем connection pool)
+            if error_occurred:
+                log.debug("[LLM] Recreating client (reset connection pool)")
+                self._client = self._create_client()
 
     async def generate(
         self,
