@@ -58,66 +58,113 @@ def _enrich_query(query: str) -> tuple[str, str]:
     """Обогащает поисковый запрос контекстом.
     
     Для игровых запросов переводит на английский и добавляет ключевые слова.
+    Для остальных запросов тоже переводит на английский (DuckDuckGo плохо ищет по-русски).
     Возвращает (enriched_query, region).
     """
     q_lower = query.lower()
     
-    # Определяем контекст Dota 2
-    is_dota = any(w in q_lower for w in [
-        "дота", "dota", "доту", "доте", "антимаг", "инвокер", "пудж",
-        "магнус", "фантом", "спектр", "медуз", "патч", "патче",
-        "билд", "сборк", "собирать", "собрать", "айтем", "шмотк",
-        "dotabuff", "дотабаф",
-    ])
+    # === Определяем контекст Dota 2 ===
+    # Проверяем наличие героев
+    found_hero = ""
+    for ru, en in _DOTA_HEROES.items():
+        if ru in q_lower:
+            found_hero = en
+            break
+    
+    # Широкий набор триггеров для Dota
+    dota_keywords = [
+        "дота", "dota", "доту", "доте", "доты",
+        "патч", "патче", "patch",
+        "билд", "сборк", "собирать", "собрать",
+        "айтем", "шмотк", "item",
+        "dotabuff", "дотабаф", "дотабафф",
+        "винрейт", "winrate", "пикрейт",
+        "метовый", "метовая", "метавый", "метавая", "метровый", "в мете", "мета ",
+        "контрпик", "контр пик",
+        "имба", "нерф", "бафф",
+        "популярный герой", "популярная шмотк", "популярный айтем",
+        "крутой в доте", "сильный герой", "лучший герой",
+        "shadow fiend", "anti-mage", "sf ",
+    ]
+    is_dota = found_hero != "" or any(w in q_lower for w in dota_keywords)
     
     if is_dota:
-        # Переводим героев на английский
-        enriched = q_lower
-        for ru, en in _DOTA_HEROES.items():
-            if ru in enriched:
-                enriched = enriched.replace(ru, en)
-                break
-        
         # Извлекаем номер патча если есть
-        patch_match = re.search(r'(\d+\.\d+\w*)', enriched)
+        patch_match = re.search(r'(\d+\.\d+\w*)', q_lower)
         patch = patch_match.group(1) if patch_match else ""
         
         # Определяем тип запроса
-        if any(w in q_lower for w in ["собирать", "собрать", "билд", "сборк", "айтем", "шмотк"]):
+        if any(w in q_lower for w in ["собирать", "собрать", "билд", "сборк", "айтем", "шмотк", "item"]):
             query_type = "best items build"
-        elif any(w in q_lower for w in ["контрпик", "контр пик"]):
+        elif any(w in q_lower for w in ["контрпик", "контр пик", "counter"]):
             query_type = "counter pick"
-        elif any(w in q_lower for w in ["гайд", "как играть"]):
+        elif any(w in q_lower for w in ["гайд", "как играть", "guide"]):
             query_type = "guide"
+        elif any(w in q_lower for w in ["винрейт", "winrate", "процент"]):
+            query_type = "winrate"
+        elif any(w in q_lower for w in ["метовый", "метавый", "метровый", "в мете", "мета ", "популярн", "крутой", "сильн", "лучший", "самый"]):
+            query_type = "best meta heroes highest winrate"
         else:
             query_type = "build guide"
         
-        # Ищем имя героя в enriched
-        hero_name = ""
-        for ru, en in _DOTA_HEROES.items():
-            if en.lower() in enriched.lower():
-                hero_name = en
-                break
-        
-        if hero_name:
-            final = f"dota 2 {hero_name} {query_type}"
+        if found_hero:
+            final = f"dota 2 {found_hero} {query_type}"
             if patch:
                 final += f" patch {patch}"
             final += " dotabuff 2025"
         else:
-            # Нет конкретного героя — общий запрос
             final = f"dota 2 {query_type}"
             if patch:
                 final += f" patch {patch}"
-            final += " 2025"
+            final += " dotabuff 2025"
         
         log.info(f"[SEARCH] Dota query enriched: '{query}' -> '{final}'")
-        return final, "wt-wt"  # worldwide для английских запросов
+        return final, "wt-wt"
     
-    # Для остальных запросов — добавляем "2025" для актуальности
+    # === Не-Dota запросы: переводим ключевые слова на английский ===
+    # DuckDuckGo плохо ищет по-русски, возвращает мусор про грамматику
+    
+    # Погода
+    weather_match = re.search(r'погод[аеу]\s+(?:в\s+)?(.+)', q_lower)
+    if weather_match or 'погод' in q_lower:
+        city = weather_match.group(1).strip(' ?!.') if weather_match else ""
+        if city:
+            final = f"weather {city} today"
+        else:
+            final = "weather today"
+        log.info(f"[SEARCH] Weather query: '{query}' -> '{final}'")
+        return final, "wt-wt"
+    
+    # Новости
+    news_match = re.search(r'новост[иья]\s+(?:в\s+)?(.+)', q_lower)
+    if news_match or 'новост' in q_lower:
+        topic = news_match.group(1).strip(' ?!.') if news_match else ""
+        if topic:
+            final = f"{topic} news today 2025"
+        else:
+            final = "news today 2025"
+        log.info(f"[SEARCH] News query: '{query}' -> '{final}'")
+        return final, "wt-wt"
+    
+    # Курсы валют
+    if any(w in q_lower for w in ["курс", "доллар", "евро", "биткоин"]):
+        final = query + " exchange rate today"
+        log.info(f"[SEARCH] Finance query: '{query}' -> '{final}'")
+        return final, "wt-wt"
+    
+    # Для всего остального — ищем на русском но без вопросительных слов
+    # (DuckDuckGo триггерится на "какой" и возвращает грамматику)
+    cleaned = re.sub(r'\b(какой|какая|какое|какие|каким|какую|сколько|когда|где|кто|что)\b', '', q_lower)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip(' ?!.,;:')
+    if len(cleaned) > 5:
+        if not any(str(y) in cleaned for y in range(2020, 2027)):
+            cleaned += " 2025"
+        log.info(f"[SEARCH] Cleaned query: '{query}' -> '{cleaned}'")
+        return cleaned, "ru-ru"
+    
+    # Фоллбэк
     if not any(str(y) in query for y in range(2020, 2027)):
         query += " 2025"
-    
     return query, "ru-ru"
 
 
