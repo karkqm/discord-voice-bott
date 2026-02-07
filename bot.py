@@ -66,48 +66,19 @@ stt_engine: Optional[STTEngine] = None
 # Активные задачи генерации (одна на юзера, новая отменяет предыдущую)
 _user_tasks: dict[int, asyncio.Task] = {}  # user_id -> current generation task
 
-# Barge-in cooldown: не прерывать бота сразу после распознавания речи
-_last_stt_finish_time: float = 0.0
-_barge_in_cooldown_sec: float = 1.5  # секунды после распознавания
+# Защита от перебивания: дать боту договорить перед новым ответом
+_last_response_start: float = 0.0
+_response_cooldown_sec: float = 3.0  # секунды после начала ответа бота
 
 
 # --- Callbacks ---
 
 def on_stt_text_ready(text: str, user_id: int) -> None:
     """Колбэк: STT распознал финальный текст от пользователя."""
-    global _last_stt_finish_time
-    _last_stt_finish_time = time.time()  # Записываем время окончания речи
-    
-    # Запускаем обработку в event loop бота
     asyncio.run_coroutine_threadsafe(
         handle_user_speech(text, user_id),
         bot.loop,
     )
-
-
-def on_user_speech_begin() -> None:
-    """Колбэк: пользователь начал говорить (Barge-in)."""
-    # Проверяем cooldown — не прерывать сразу после распознавания речи
-    elapsed = time.time() - _last_stt_finish_time
-    if elapsed < _barge_in_cooldown_sec:
-        return  # Игнорируем — слишком рано после распознавания
-    
-    # Проверяем, что бот вообще что-то говорит
-    if not voice_player.is_playing:
-        return  # Нечего прерывать
-    
-    log.info(f"{YELLOW}<<< Barge-in: user interrupted{RESET}")
-    
-    # 1. Останавливаем звук
-    voice_player.stop()
-    
-    # 2. Останавливаем TTS генерацию
-    tts_engine.stop()
-    
-    # 3. Отменяем все активные генерации
-    for uid, task in _user_tasks.items():
-        if task and not task.done():
-            task.cancel()
 
 
 def on_voice_audio_chunk(audio_data: bytes, user_id: int) -> None:
@@ -148,13 +119,24 @@ async def handle_user_speech(text: str, user_id: int) -> None:
 
         log.info(f"{BOLD}{user_name}{RESET}: {text}")
 
-        # Отменяем ВСЕ активные генерации (новое сообщение = новый контекст)
+        global _last_response_start
+        
+        # Cooldown: если бот только начал отвечать, не перебиваем
+        time_since_response = time.time() - _last_response_start
+        if _last_response_start > 0 and time_since_response < _response_cooldown_sec:
+            # Бот ещё говорит — пропускаем, но текст уже в истории
+            log.info(f"{YELLOW}[SKIP] Bot is speaking ({time_since_response:.1f}s ago), queued in history{RESET}")
+            return
+        
+        # Отменяем предыдущие генерации
         for uid, prev_task in list(_user_tasks.items()):
             if prev_task and not prev_task.done():
                 prev_task.cancel()
         
         tts_engine.stop()
         voice_player.stop()
+        
+        _last_response_start = time.time()
         
         task = asyncio.create_task(
             generate_and_speak(
@@ -166,7 +148,7 @@ async def handle_user_speech(text: str, user_id: int) -> None:
         try:
             await task
         except asyncio.CancelledError:
-             log.info("Generation cancelled (barge-in)")
+             log.info("Generation cancelled (new message)")
             
     except Exception as e:
         log.error(f"[PIPELINE] handle_user_speech error: {e}", exc_info=True)
@@ -274,6 +256,9 @@ async def generate_and_speak(
         if full_response.strip():
             conversation.add_bot_message(full_response.strip())
         
+        global _last_response_start
+        _last_response_start = 0.0  # Сбрасываем cooldown — бот закончил
+        
         total_time = time.time() - pipeline_start
         llm_ms = (t_first_sentence - t_llm_start) * 1000 if t_first_sentence else 0
         resp_preview = full_response.strip()[:60]
@@ -307,9 +292,6 @@ async def on_ready():
         "on_text_ready": on_stt_text_ready,
     }
     
-    if config.STT_BACKEND == "realtime":
-        stt_kwargs["on_speech_begin"] = on_user_speech_begin
-
     stt_engine = STTEngine(**stt_kwargs)
     stt_engine.start()
 
