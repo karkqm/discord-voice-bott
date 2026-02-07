@@ -80,63 +80,55 @@ class LLMEngine:
                 ],
             })
 
-        # Ретрай: 2 попытки с таймаутом 10с каждая
-        for attempt in range(2):
-            try:
-                stream = await asyncio.wait_for(
-                    self._client.chat.completions.create(
-                        model=self.config.LLM_MODEL,
-                        messages=request_messages,
-                        max_tokens=self.config.LLM_MAX_TOKENS,
-                        temperature=self.config.LLM_TEMPERATURE,
-                        stream=True,
-                    ),
-                    timeout=10.0,
-                )
+        try:
+            stream = await asyncio.wait_for(
+                self._client.chat.completions.create(
+                    model=self.config.LLM_MODEL,
+                    messages=request_messages,
+                    max_tokens=self.config.LLM_MAX_TOKENS,
+                    temperature=self.config.LLM_TEMPERATURE,
+                    stream=True,
+                ),
+                timeout=20.0,  # 20с — первый запрос может быть cold start (до 18с)
+            )
 
-                buffer = ""
-                sentence_enders = {".", "!", "?", "…", "\n"}
-                clause_enders = {",", ";", ":", "—", " – "}
+            buffer = ""
+            sentence_enders = {".", "!", "?", "…", "\n"}
+            clause_enders = {",", ";", ":", "—", " – "}
 
-                async for chunk in stream:
-                    if not chunk.choices:
-                        continue
-                    delta = chunk.choices[0].delta
-                    if delta.content:
-                        buffer += delta.content
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    buffer += delta.content
 
-                        while True:
-                            split_pos = -1
-                            
-                            for i, char in enumerate(buffer):
-                                if char in sentence_enders:
-                                    split_pos = i
-                                    break
-                                if char in clause_enders and i >= 15:
-                                    split_pos = i
-                                    break
-
-                            if split_pos >= 0:
-                                sentence = buffer[: split_pos + 1].strip()
-                                buffer = buffer[split_pos + 1 :]
-                                if sentence:
-                                    yield sentence
-                            else:
+                    while True:
+                        split_pos = -1
+                        
+                        for i, char in enumerate(buffer):
+                            if char in sentence_enders:
+                                split_pos = i
+                                break
+                            if char in clause_enders and i >= 15:
+                                split_pos = i
                                 break
 
-                if buffer.strip():
-                    yield buffer.strip()
-                return  # успех — выходим
+                        if split_pos >= 0:
+                            sentence = buffer[: split_pos + 1].strip()
+                            buffer = buffer[split_pos + 1 :]
+                            if sentence:
+                                yield sentence
+                        else:
+                            break
 
-            except asyncio.TimeoutError:
-                if attempt == 0:
-                    log.warning("LLM API timeout, retrying...")
-                    await asyncio.sleep(1.0)
-                else:
-                    log.warning("LLM API timeout (2/2), giving up")
-            except Exception as e:
-                log.error(f"LLM generation error: {e}")
-                return
+            if buffer.strip():
+                yield buffer.strip()
+
+        except asyncio.TimeoutError:
+            log.warning("LLM API timeout (20s)")
+        except Exception as e:
+            log.error(f"LLM generation error: {e}")
 
     async def generate(
         self,
