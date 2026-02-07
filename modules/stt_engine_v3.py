@@ -66,9 +66,11 @@ class STTEngine:
         self._vad_model = None
         self._vad_utils = None
         
-        self._ready = False
+        self._vad_ready = False  # VAD загружен — можно принимать аудио
+        self._ready = False       # Whisper загружен — можно транскрибировать
         self._running = False
         self._lock = threading.Lock()
+        self._audio_received_count = 0
         
         # Per-user состояния
         self._user_states: dict[int, UserVADState] = {}
@@ -101,6 +103,13 @@ class STTEngine:
             )
             log.info("Silero VAD loaded")
             
+            # VAD готов — можно начинать принимать аудио и детектить речь
+            self._vad_ready = True
+            
+            # Запускаем монитор тишины
+            self._monitor_thread = threading.Thread(target=self._silence_monitor, daemon=True)
+            self._monitor_thread.start()
+            
             # 2. Загружаем faster-whisper модель
             log.info(f"Loading faster-whisper model '{self.model_name}'...")
             from faster_whisper import WhisperModel
@@ -110,13 +119,9 @@ class STTEngine:
                 device="cuda",
                 compute_type="float16",
             )
-            log.info(f"STT engine v3 ready (model={self.model_name}, CUDA)")
+            log.info(f"Whisper '{self.model_name}' loaded — STT fully ready")
             
-            # 3. Запускаем пул транскрипции и монитор тишины
             self._transcribe_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stt")
-            self._monitor_thread = threading.Thread(target=self._silence_monitor, daemon=True)
-            self._monitor_thread.start()
-            
             self._ready = True
             
         except Exception as e:
@@ -139,13 +144,18 @@ class STTEngine:
             tensor = torch.from_numpy(samples)
             prob = self._vad_model(tensor, VAD_SAMPLE_RATE).item()
             return prob
-        except Exception:
+        except Exception as e:
+            log.error(f"VAD error: {e}")
             return 0.0
 
     def feed_audio(self, audio_data: bytes, user_id: int) -> None:
         """Подаёт аудио от конкретного юзера в его персональный VAD."""
-        if not self._ready:
+        if not self._vad_ready:
             return
+        
+        self._audio_received_count += 1
+        if self._audio_received_count == 1:
+            log.info(f"First audio chunk received from user {user_id} ({len(audio_data)} bytes)")
         
         with self._lock:
             state = self._get_user_state(user_id)
@@ -169,6 +179,7 @@ class STTEngine:
                     state.is_speaking = True
                     state.speech_start_time = now
                     state.audio_buffer = bytearray()
+                    log.info(f"Speech start: user {user_id} (prob={speech_prob:.2f})")
                     
                     # Колбэк barge-in
                     if self.on_speech_begin:
@@ -208,6 +219,12 @@ class STTEngine:
         # Минимальная длительность
         duration = len(audio_data) / (VAD_SAMPLE_RATE * 2)  # bytes / (sample_rate * 2 bytes per sample)
         if duration < MIN_SPEECH_DURATION:
+            return
+        
+        log.info(f"Speech end: user {user_id} ({duration:.1f}s audio)")
+        
+        if not self._ready:
+            log.warning("Whisper not loaded yet, dropping audio")
             return
         
         # Отправляем в пул транскрипции
