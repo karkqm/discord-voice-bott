@@ -81,8 +81,7 @@ class TTSEngine:
             except ImportError:
                 pass
             
-            # Способ 1: torch.hub.load (прямой доступ к модели, быстрый синтез)
-            self._use_direct = False
+            # Загрузка модели через torch.hub (save_wav метод)
             try:
                 model, example = torch.hub.load(
                     repo_or_dir='snakers4/silero-models',
@@ -91,55 +90,27 @@ class TTSEngine:
                     speaker='v4_ru',
                     trust_repo=True,
                 )
-                if model is not None and hasattr(model, 'apply_tts'):
+                if model is not None and hasattr(model, 'save_wav'):
                     self._model = model.to(self._device)
-                    self._use_direct = True
-                    log.info(f"Loaded via torch.hub (direct mode)")
+                    log.info("Loaded via torch.hub")
                 else:
-                    log.warning(f"torch.hub returned invalid model: {type(model)}")
-                    raise RuntimeError("Invalid model")
+                    raise RuntimeError(f"Invalid model: {type(model)}")
             except Exception as hub_err:
-                log.warning(f"torch.hub.load failed: {hub_err}, trying silero_tts package...")
-                
-                # Способ 2: silero_tts пакет (файловый I/O, но совместим с nightly)
+                log.warning(f"torch.hub failed: {hub_err}, using silero_tts package...")
                 from silero_tts.silero_tts import SileroTTS
                 self._silero_pkg = SileroTTS(
-                    model_id='v4_ru',
-                    language='ru',
-                    speaker=self.voice,
-                    sample_rate=SILERO_SAMPLE_RATE,
-                    device=self._device,
+                    model_id='v4_ru', language='ru', speaker=self.voice,
+                    sample_rate=SILERO_SAMPLE_RATE, device=self._device,
                 )
-                self._model = self._silero_pkg  # используем пакетный .tts() метод
-                self._use_direct = False
-                log.info(f"Loaded via silero_tts package (file I/O mode)")
+                self._model = None  # используем _silero_pkg
             
-            # Прогрев модели + проверка работоспособности
+            # Прогрев
             log.info("Warming up TTS...")
-            warmup_ok = False
-            for i in range(3):
-                result = self._synthesize_pcm("Привет.")
-                if result and len(result) > 100:
-                    warmup_ok = True
-            
-            if not warmup_ok and self._use_direct:
-                log.warning("Direct mode warmup failed, falling back to file I/O...")
-                # Fallback к файловому режиму
-                from silero_tts.silero_tts import SileroTTS
-                self._silero_pkg = SileroTTS(
-                    model_id='v4_ru',
-                    language='ru',
-                    speaker=self.voice,
-                    sample_rate=SILERO_SAMPLE_RATE,
-                    device=self._device,
-                )
-                self._use_direct = False
-                # Прогрев файлового режима
-                for _ in range(2):
-                    self._synthesize_pcm("Привет.")
+            for _ in range(3):
+                self._synthesize_pcm("Привет.")
             
             self._ready = True
-            mode = "direct" if self._use_direct else "file I/O"
+            mode = "torch.hub" if self._model else "silero_tts pkg"
             log.info(f"TTS ready (Silero v4, {self.voice}, {self._device}, {mode})")
             
             # Один worker поток
@@ -151,66 +122,21 @@ class TTSEngine:
 
     def _synthesize_pcm(self, text: str) -> Optional[bytes]:
         """Синтезирует текст в PCM int16 bytes."""
-        if not self._model:
-            return None
-        
-        if self._use_direct:
-            return self._synth_direct(text)
-        else:
-            return self._synth_via_file(text)
-
-    def _synth_direct(self, text: str) -> Optional[bytes]:
-        """Прямой синтез через torch модель (без файлового I/O)."""
+        import tempfile, os, wave
         try:
-            # Silero v4: пробуем разные способы вызова
-            audio = None
+            tmp_path = os.path.join(tempfile.gettempdir(), f"silero_tts_{threading.get_ident()}.wav")
             
-            # Способ 1: apply_tts (v3 API)
-            if hasattr(self._model, 'apply_tts'):
-                audio = self._model.apply_tts(
+            if self._model is not None:
+                # torch.hub модель — save_wav напрямую (без silero_tts пакета)
+                self._model.save_wav(
                     text=text,
                     speaker=self.voice,
                     sample_rate=SILERO_SAMPLE_RATE,
+                    audio_path=tmp_path,
                 )
-            
-            # Способ 2: save_wav возвращает tensor (v4 API)
-            if audio is None and hasattr(self._model, 'save_wav'):
-                import tempfile, os, wave
-                tmp = os.path.join(tempfile.gettempdir(), f"silero_direct_{threading.get_ident()}.wav")
-                self._model.save_wav(text=text, speaker=self.voice, sample_rate=SILERO_SAMPLE_RATE, audio_path=tmp)
-                with wave.open(tmp, 'rb') as wf:
-                    pcm_bytes = wf.readframes(wf.getnframes())
-                try:
-                    os.remove(tmp)
-                except Exception:
-                    pass
-                return pcm_bytes
-            
-            if audio is None:
-                log.error(f"Direct TTS: model has no apply_tts or save_wav. Attrs: {[a for a in dir(self._model) if not a.startswith('_')]}")
-                return None
-            
-            if isinstance(audio, torch.Tensor):
-                audio_np = audio.cpu().numpy()
             else:
-                audio_np = np.array(audio, dtype=np.float32)
-            
-            if len(audio_np) == 0:
-                log.error("Direct TTS: empty audio tensor")
-                return None
-            
-            pcm_int16 = (audio_np * 32767).astype(np.int16)
-            return pcm_int16.tobytes()
-        except Exception as e:
-            log.error(f"Direct TTS error: {e}", exc_info=True)
-            return None
-
-    def _synth_via_file(self, text: str) -> Optional[bytes]:
-        """Синтез через silero_tts пакет (WAV файл)."""
-        try:
-            import tempfile, os, wave
-            tmp_path = os.path.join(tempfile.gettempdir(), f"silero_tts_{threading.get_ident()}.wav")
-            self._silero_pkg.tts(text, tmp_path)
+                # silero_tts пакет
+                self._silero_pkg.tts(text, tmp_path)
             
             with wave.open(tmp_path, 'rb') as wf:
                 pcm_bytes = wf.readframes(wf.getnframes())
@@ -222,7 +148,7 @@ class TTSEngine:
             
             return pcm_bytes
         except Exception as e:
-            log.error(f"File TTS error: {e}", exc_info=True)
+            log.error(f"TTS synth error: {e}", exc_info=True)
             return None
 
     def _synthesis_worker(self) -> None:
