@@ -47,24 +47,49 @@ class TTSEngine:
         self._init_thread.start()
         log.info("TTS engine initialization started in background...")
 
+    def _check_cuda_compatible(self) -> bool:
+        """Проверяет совместимость GPU с текущей версией PyTorch."""
+        if not torch.cuda.is_available():
+            return False
+        try:
+            # Пробуем создать тензор на GPU — если sm_xxx не поддерживается, упадёт
+            t = torch.zeros(1, device="cuda")
+            del t
+            return True
+        except Exception as e:
+            log.warning(f"CUDA available but incompatible: {e}")
+            return False
+
     def _init_engine(self) -> None:
         """Загрузка Silero TTS v4 модели."""
         try:
-            # Определяем устройство
-            if torch.cuda.is_available():
+            # Определяем устройство с проверкой совместимости
+            if self._check_cuda_compatible():
                 self._device = "cuda"
             else:
                 self._device = "cpu"
+                if torch.cuda.is_available():
+                    log.warning("CUDA detected but not compatible with this PyTorch. Using CPU.")
+                    log.warning("For RTX 50xx: pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128")
             
             log.info(f"Loading Silero TTS v4 on {self._device}...")
             
-            self._model = torch.hub.load(
+            result = torch.hub.load(
                 repo_or_dir='snakers4/silero-models',
                 model='silero_tts',
                 language='ru',
                 speaker='v4_ru',
                 trust_repo=True,
-            )[0]  # model is first element of tuple
+            )
+            
+            # torch.hub.load returns (model, symbols, sample_rate, example, apply_tts) or just model
+            if isinstance(result, tuple):
+                self._model = result[0]
+            else:
+                self._model = result
+            
+            if self._model is None:
+                raise RuntimeError("Silero model loaded as None")
             
             self._model = self._model.to(self._device)
             
