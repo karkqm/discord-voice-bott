@@ -2,6 +2,7 @@ import asyncio
 import base64
 from typing import AsyncGenerator, Optional
 
+import httpx
 from openai import AsyncOpenAI
 
 from config import Config
@@ -31,6 +32,8 @@ class LLMEngine:
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url if base_url else None,
+            timeout=httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0),
+            max_retries=0,  # мы сами ретрайм
         )
         log.info(f"LLM engine started (model={self.config.LLM_MODEL}, base_url={base_url}, local={self.config.IS_LOCAL_LLM})")
 
@@ -76,60 +79,63 @@ class LLMEngine:
                 ],
             })
 
-        try:
-            stream = await asyncio.wait_for(
-                self._client.chat.completions.create(
-                    model=self.config.LLM_MODEL,
-                    messages=request_messages,
-                    max_tokens=self.config.LLM_MAX_TOKENS,
-                    temperature=self.config.LLM_TEMPERATURE,
-                    stream=True,
-                ),
-                timeout=15.0,
-            )
+        # Ретрай: 2 попытки с таймаутом 10с каждая
+        for attempt in range(2):
+            try:
+                stream = await asyncio.wait_for(
+                    self._client.chat.completions.create(
+                        model=self.config.LLM_MODEL,
+                        messages=request_messages,
+                        max_tokens=self.config.LLM_MAX_TOKENS,
+                        temperature=self.config.LLM_TEMPERATURE,
+                        stream=True,
+                    ),
+                    timeout=10.0,
+                )
 
-            buffer = ""
-            # Split on sentence enders AND commas for faster first audio
-            sentence_enders = {".", "!", "?", "…", "\n"}
-            clause_enders = {",", ";", ":", "—", " – "}  # yield on clauses too
+                buffer = ""
+                sentence_enders = {".", "!", "?", "…", "\n"}
+                clause_enders = {",", ";", ":", "—", " – "}
 
-            async for chunk in stream:
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
-                if delta.content:
-                    buffer += delta.content
+                async for chunk in stream:
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
+                    if delta.content:
+                        buffer += delta.content
 
-                    while True:
-                        split_pos = -1
-                        split_type = None
-                        
-                        for i, char in enumerate(buffer):
-                            if char in sentence_enders:
-                                split_pos = i
-                                split_type = "sentence"
+                        while True:
+                            split_pos = -1
+                            
+                            for i, char in enumerate(buffer):
+                                if char in sentence_enders:
+                                    split_pos = i
+                                    break
+                                if char in clause_enders and i >= 15:
+                                    split_pos = i
+                                    break
+
+                            if split_pos >= 0:
+                                sentence = buffer[: split_pos + 1].strip()
+                                buffer = buffer[split_pos + 1 :]
+                                if sentence:
+                                    yield sentence
+                            else:
                                 break
-                            # Yield on commas only if we have enough text (>15 chars)
-                            if char in clause_enders and i >= 15:
-                                split_pos = i
-                                split_type = "clause"
-                                break
 
-                        if split_pos >= 0:
-                            sentence = buffer[: split_pos + 1].strip()
-                            buffer = buffer[split_pos + 1 :]
-                            if sentence:
-                                yield sentence
-                        else:
-                            break
+                if buffer.strip():
+                    yield buffer.strip()
+                return  # успех — выходим
 
-            if buffer.strip():
-                yield buffer.strip()
-
-        except asyncio.TimeoutError:
-            log.warning("LLM API timeout (15s)")
-        except Exception as e:
-            log.error(f"LLM generation error: {e}")
+            except asyncio.TimeoutError:
+                if attempt == 0:
+                    log.warning("LLM API timeout, retrying...")
+                    await asyncio.sleep(1.0)
+                else:
+                    log.warning("LLM API timeout (2/2), giving up")
+            except Exception as e:
+                log.error(f"LLM generation error: {e}")
+                return
 
     async def generate(
         self,
