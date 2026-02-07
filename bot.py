@@ -191,6 +191,7 @@ async def generate_and_speak(
 ) -> None:
     """Генерирует ответ LLM стримом и озвучивает каждое предложение сразу."""
     try:
+        pipeline_start = time.time()
         mc_context = minecraft_bot.get_status_info() if (include_minecraft and minecraft_bot) else None
         messages = conversation.get_messages(
             include_screen=include_screen,
@@ -270,7 +271,9 @@ async def generate_and_speak(
 
         if full_response.strip():
             conversation.add_bot_message(full_response.strip())
-        log.info(f"[PIPELINE] Done. Response: {full_response.strip()[:80]}...")
+        
+        total_time = time.time() - pipeline_start
+        log.info(f"[PIPELINE] Done in {total_time:.2f}s. Response: {full_response.strip()[:80]}...")
 
     except Exception as e:
         log.error(f"[PIPELINE] generate_and_speak error: {e}", exc_info=True)

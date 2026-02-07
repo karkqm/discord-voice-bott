@@ -97,12 +97,12 @@ class VoicePlayer:
             self._voice_client = None
             log.info("Disconnected from voice channel")
 
-    async def play_stream_chunk(self, audio_data: bytes, sample_rate: int = 24000) -> None:
-        """Принимает кусок аудио, ресемплит и отправляет в поток."""
+    async def play_stream_chunk(self, audio_data: bytes, sample_rate: int = 48000) -> None:
+        """Принимает кусок аудио, конвертирует в 48kHz stereo и отправляет в поток."""
         if not self._voice_client or not self._voice_client.is_connected():
             return
 
-        # Ресемплинг в 48kHz stereo
+        # Конвертируем в 48kHz stereo (Discord формат)
         pcm_48k = resample_to_48k_stereo(audio_data, sample_rate, channels=1)
 
         async with self._lock:

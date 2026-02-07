@@ -41,20 +41,7 @@ if %errorlevel% neq 0 (
 )
 echo.
 
-:: Check mpv (needed by RealtimeTTS)
-where mpv >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [!] mpv not found. Installing...
-    winget install mpv.net --accept-package-agreements --accept-source-agreements
-    if %errorlevel% neq 0 (
-        echo [!] Failed to install mpv via winget.
-        echo     Download manually: https://mpv.io/
-    ) else (
-        echo [OK] mpv installed
-    )
-) else (
-    echo [OK] mpv found
-)
+:: mpv no longer needed (Silero TTS is local)
 echo.
 
 :: Create venv
@@ -110,10 +97,8 @@ pip install -r requirements.txt --quiet
 echo [OK] Dependencies installed
 echo.
 
-:: Install edge-tts
-echo [*] Installing edge-tts...
-pip install edge-tts --quiet
-echo [OK] edge-tts installed
+:: Silero TTS downloads model automatically on first run
+echo [i] Silero TTS will download model on first run (~100MB)
 echo.
 
 :: For AMD GPU - onnx-asr + DirectML

@@ -1,145 +1,162 @@
 import threading
-import io
+import time
+import queue
 from typing import Optional, Callable
+
+import numpy as np
+import torch
 
 from utils.logger import setup_logger
 
 log = setup_logger("tts_engine")
 
+# Silero TTS sample rate
+SILERO_SAMPLE_RATE = 48000
+
+
 class TTSEngine:
-    """TTS через RealtimeTTS (EdgeEngine) — стриминговый синтез речи."""
+    """TTS через Silero v4 — локальный, быстрый, CUDA.
+    
+    Синтез ~50-100ms на GPU, ~200ms на CPU для одного предложения.
+    Прямой PCM выход, без MP3/pydub/mpv зависимостей.
+    """
 
     def __init__(
         self,
-        engine: str = "edge",
-        voice: str = "ru-RU-DmitryNeural",
+        engine: str = "silero",
+        voice: str = "xenia",
         on_audio_chunk: Optional[Callable[[bytes, int], None]] = None
     ):
         self.engine_name = engine
         self.voice = voice
         self.on_audio_chunk = on_audio_chunk
-        self._stream = None
+        self._model = None
         self._ready = False
         self._is_speaking = False
+        self._stopped = False
+        self._device = "cpu"
         
-        # Буфер для накопления MP3 перед декодированием (оптимизация pydub overhead)
-        self._mp3_buffer = io.BytesIO()
-        self._mp3_buffer_size = 0
-        self._min_decode_size = 4096  # ~0.25 сек аудио 128kbps
+        # Очередь текста для синтеза
+        self._text_queue: queue.Queue = queue.Queue()
+        self._worker_thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
-        """Запускает инициализацию RealtimeTTS в фоновом потоке."""
+        """Запускает инициализацию Silero TTS в фоновом потоке."""
+        self._stopped = False
         self._init_thread = threading.Thread(target=self._init_engine, daemon=True)
         self._init_thread.start()
         log.info("TTS engine initialization started in background...")
 
     def _init_engine(self) -> None:
-        """Инициализация RealtimeTTS."""
+        """Загрузка Silero TTS v4 модели."""
         try:
-            from RealtimeTTS import TextToAudioStream, EdgeEngine
-
-            # TODO: Поддержка Coqui/System если нужно, пока только Edge
-            tts_engine = EdgeEngine()
-            tts_engine.set_voice(self.voice)
-
-            self._stream = TextToAudioStream(
-                tts_engine, 
-                log_characters=False,
-                on_audio_stream_start=self._on_stream_start,
-                on_audio_stream_stop=self._on_stream_stop,
-            )
+            # Определяем устройство
+            if torch.cuda.is_available():
+                self._device = "cuda"
+            else:
+                self._device = "cpu"
+            
+            log.info(f"Loading Silero TTS v4 on {self._device}...")
+            
+            self._model = torch.hub.load(
+                repo_or_dir='snakers4/silero-models',
+                model='silero_tts',
+                language='ru',
+                speaker='v4_ru',
+                trust_repo=True,
+            )[0]  # model is first element of tuple
+            
+            self._model = self._model.to(self._device)
+            
+            # Прогрев модели
+            log.info("Warming up TTS model...")
+            _ = self._model.apply_tts(text="Привет.", speaker=self.voice, sample_rate=SILERO_SAMPLE_RATE)
+            
             self._ready = True
-            log.info(f"TTS engine ready (RealtimeTTS EdgeEngine, voice={self.voice})")
+            log.info(f"TTS engine ready (Silero v4, voice={self.voice}, device={self._device})")
+            
+            # Запускаем worker для обработки очереди
+            self._worker_thread = threading.Thread(target=self._synthesis_worker, daemon=True)
+            self._worker_thread.start()
+            
         except Exception as e:
             log.error(f"Failed to start TTS engine: {e}", exc_info=True)
 
-    def _on_stream_start(self):
-        self._is_speaking = True
-        self._mp3_buffer = io.BytesIO()
-        self._mp3_buffer_size = 0
-
-    def _on_stream_stop(self):
-        # Декодируем остаток буфера
-        self._flush_mp3_buffer()
-        self._is_speaking = False
+    def _synthesis_worker(self) -> None:
+        """Фоновый поток: берёт текст из очереди, синтезирует, отдаёт PCM."""
+        while not self._stopped:
+            try:
+                text = self._text_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            
+            if self._stopped:
+                break
+                
+            try:
+                self._is_speaking = True
+                t0 = time.time()
+                
+                audio_tensor = self._model.apply_tts(
+                    text=text,
+                    speaker=self.voice,
+                    sample_rate=SILERO_SAMPLE_RATE,
+                )
+                
+                elapsed = time.time() - t0
+                
+                # Конвертируем tensor -> int16 PCM bytes
+                audio_np = audio_tensor.cpu().numpy()
+                # Silero выдаёт float32 [-1, 1] -> int16
+                pcm_int16 = (audio_np * 32767).astype(np.int16)
+                pcm_bytes = pcm_int16.tobytes()
+                
+                duration = len(pcm_int16) / SILERO_SAMPLE_RATE
+                log.info(f"TTS synthesized: {text[:40]}... ({elapsed:.2f}s synth, {duration:.1f}s audio)")
+                
+                if self.on_audio_chunk and not self._stopped:
+                    self.on_audio_chunk(pcm_bytes, SILERO_SAMPLE_RATE)
+                    
+            except Exception as e:
+                log.error(f"TTS synthesis error: {e}", exc_info=True)
+            finally:
+                self._is_speaking = False
+                self._text_queue.task_done()
 
     def feed(self, text: str) -> None:
-        """Подает текст в TTS поток."""
-        if not self._ready or not self._stream:
+        """Подаёт текст в очередь синтеза."""
+        if not self._ready:
             log.warning("TTS not ready, skipping text")
             return
-            
         if not text.strip():
             return
-
-        # Если поток еще не играет, запускаем (в отдельном потоке RealtimeTTS)
-        if not self._stream.is_playing():
-             # play_async запустит worker.
-             self._stream.play_async(
-                 muted=True,                 # Не играть на динамики сервера
-                 on_audio_chunk=self._on_chunk_wrapper,
-                 language="ru"
-             )
-        
-        self._stream.feed(text)
-        log.debug(f"TTS feed: {text[:30]}...")
-
-    def _on_chunk_wrapper(self, chunk: bytes):
-        """Обертка для колбэка — накапливаем и декодируем MP3."""
-        if not self.on_audio_chunk:
-            return
-            
-        self._mp3_buffer.write(chunk)
-        self._mp3_buffer_size += len(chunk)
-        
-        # Если накопили достаточно — декодируем
-        if self._mp3_buffer_size >= self._min_decode_size:
-            self._flush_mp3_buffer()
-
-    def _flush_mp3_buffer(self):
-        """Декодирует накопленный MP3 буфер и отправляет в PCM."""
-        if self._mp3_buffer_size == 0:
-            return
-            
-        try:
-            from pydub import AudioSegment
-            
-            self._mp3_buffer.seek(0)
-            # Декодируем MP3 -> PCM
-            try:
-                audio = AudioSegment.from_mp3(self._mp3_buffer)
-            except Exception:
-                # Если чанк битый или неполный, pydub может упасть.
-                # В стриминге это возможно. Просто игнорируем ошибку декодирования конкретного куска.
-                return
-
-            # Конвертируем в нужный формат: 24kHz mono 16-bit
-            audio = audio.set_frame_rate(24000).set_channels(1).set_sample_width(2)
-            pcm_data = audio.raw_data
-            
-            self.on_audio_chunk(pcm_data, 24000)
-            
-            # Сбрасываем буфер
-            self._mp3_buffer = io.BytesIO()
-            self._mp3_buffer_size = 0
-            
-        except Exception as e:
-            log.error(f"MP3 flush error: {e}")
+        self._text_queue.put(text)
+        log.debug(f"TTS queued: {text[:30]}...")
 
     def stop(self) -> None:
-        """Останавливает чтение и очищает очередь."""
-        if self._stream:
+        """Останавливает синтез и очищает очередь."""
+        # Очищаем очередь
+        while not self._text_queue.empty():
             try:
-                self._stream.stop()
-            except Exception:
-                pass
+                self._text_queue.get_nowait()
+                self._text_queue.task_done()
+            except queue.Empty:
+                break
         self._is_speaking = False
+
+    def shutdown(self) -> None:
+        """Полностью останавливает движок."""
+        self._stopped = True
+        self.stop()
+        self._ready = False
+        self._model = None
+        log.info("TTS engine stopped")
 
     @property
     def is_speaking(self) -> bool:
-        return self._is_speaking or (self._stream and self._stream.is_playing())
+        return self._is_speaking or not self._text_queue.empty()
 
     async def synthesize(self, text: str) -> Optional[bytes]:
-        """Legacy метод (совместимость). Будет пустым."""
+        """Legacy метод (совместимость)."""
         self.feed(text)
         return None

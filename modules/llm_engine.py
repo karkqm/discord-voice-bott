@@ -87,8 +87,14 @@ class LLMEngine:
             )
             log.debug("LLM stream created, reading chunks...")
 
+            import time
+            t0 = time.time()
+            first_yield = True
+            
             buffer = ""
+            # Split on sentence enders AND commas for faster first audio
             sentence_enders = {".", "!", "?", "…", "\n"}
+            clause_enders = {",", ";", ":", "—", " – "}  # yield on clauses too
 
             async for chunk in stream:
                 if not chunk.choices:
@@ -96,29 +102,39 @@ class LLMEngine:
                 delta = chunk.choices[0].delta
                 if delta.content:
                     buffer += delta.content
-                    log.debug(f"LLM chunk: {delta.content!r}")
 
                     while True:
                         split_pos = -1
+                        split_type = None
+                        
                         for i, char in enumerate(buffer):
                             if char in sentence_enders:
                                 split_pos = i
+                                split_type = "sentence"
+                                break
+                            # Yield on commas only if we have enough text (>15 chars)
+                            if char in clause_enders and i >= 15:
+                                split_pos = i
+                                split_type = "clause"
                                 break
 
                         if split_pos >= 0:
                             sentence = buffer[: split_pos + 1].strip()
                             buffer = buffer[split_pos + 1 :]
                             if sentence:
-                                log.debug(f"LLM yielding sentence: {sentence}")
+                                if first_yield:
+                                    elapsed = time.time() - t0
+                                    log.info(f"LLM first fragment in {elapsed:.2f}s: {sentence}")
+                                    first_yield = False
                                 yield sentence
                         else:
                             break
 
             if buffer.strip():
-                log.debug(f"LLM yielding remainder: {buffer.strip()}")
                 yield buffer.strip()
 
-            log.debug("LLM stream complete")
+            total = time.time() - t0
+            log.info(f"LLM stream complete in {total:.2f}s")
 
         except Exception as e:
             log.error(f"LLM generation error: {e}", exc_info=True)
