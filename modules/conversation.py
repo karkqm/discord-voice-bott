@@ -125,7 +125,7 @@ class Conversation:
         # Не проверяем последнее сообщение — в мультиюзер чате другие юзеры
         # могут говорить между ботом и ответом
         time_since_bot = time.time() - self._last_bot_speech_time
-        if self._last_bot_speech_time > 0 and time_since_bot < 5.0:
+        if self._last_bot_speech_time > 0 and time_since_bot < 8.0:
             return True
                     
         return False

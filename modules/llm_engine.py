@@ -84,7 +84,6 @@ class LLMEngine:
                     max_tokens=self.config.LLM_MAX_TOKENS,
                     temperature=self.config.LLM_TEMPERATURE,
                     stream=True,
-                    timeout=15.0,
                 ),
                 timeout=15.0,
             )
@@ -127,9 +126,10 @@ class LLMEngine:
             if buffer.strip():
                 yield buffer.strip()
 
+        except asyncio.TimeoutError:
+            log.warning("LLM API timeout (15s)")
         except Exception as e:
-            log.error(f"LLM generation error: {e}", exc_info=True)
-            yield "Ой, что-то пошло не так, повтори пожалуйста."
+            log.error(f"LLM generation error: {e}")
 
     async def generate(
         self,
