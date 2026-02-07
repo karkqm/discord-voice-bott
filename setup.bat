@@ -91,7 +91,7 @@ if "!HAS_NVIDIA!"=="1" (
     )
     if "!IS_RTX50!"=="1" (
         echo [*] Blackwell GPU detected ^(compute_cap 12+^) - installing PyTorch nightly with CUDA 12.8...
-        pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
+        pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 --force-reinstall
         set PYTORCH_INSTALLED=1
         echo [OK] PyTorch nightly CUDA 12.8 installed
     ) else (
