@@ -136,8 +136,13 @@ class VoicePlayer:
             log.error(f"Playback error: {error}")
         self._current_source = None
 
+    def mark_done(self) -> None:
+        """Помечает что данных больше не будет — плеер доиграет буфер и остановится."""
+        if self._current_source:
+            self._current_source.mark_finished()
+
     def stop(self) -> None:
-        """Останавливает текущее воспроизведение."""
+        """Останавливает текущее воспроизведение немедленно."""
         if self._current_source:
              self._current_source.mark_finished()
         

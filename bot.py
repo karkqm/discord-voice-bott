@@ -297,8 +297,12 @@ async def generate_and_speak(
             await asyncio.get_event_loop().run_in_executor(
                 None, tts_engine.wait_until_done
             )
+            # Сигнализируем плееру что данных больше не будет
+            voice_player.mark_done()
             # Ждём пока Discord доиграет буфер
-            while voice_player.is_playing:
+            for _ in range(300):  # макс 30 секунд
+                if not voice_player.is_playing:
+                    break
                 await asyncio.sleep(0.1)
         
         total_time = time.time() - pipeline_start
