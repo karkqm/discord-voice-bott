@@ -78,14 +78,26 @@ class LLMEngine:
             "Authorization": f"Bearer {self._api_key}",
         }
         
-        # Таймаут: connect 10s, total 60s (cold start до 18с + генерация)
-        timeout = aiohttp.ClientTimeout(sock_connect=10, total=60)
-
         t0 = time.time()
+        
+        # Проверяем лаг event loop (если >100ms — что-то блокирует)
+        loop_t = time.time()
+        await asyncio.sleep(0)
+        loop_lag = (time.time() - loop_t) * 1000
+        if loop_lag > 100:
+            log.warning(f"[LLM] Event loop lag: {loop_lag:.0f}ms!")
+        
         log.debug("[LLM] Sending request...")
 
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            # Новая сессия каждый раз = новое TCP соединение
+            # sock_connect=3s — если TCP не подключился за 3с, отмена
+            # sock_read=30s — если данные не приходят 30с, отмена  
+            # total=45s — общий лимит на весь запрос
+            timeout = aiohttp.ClientTimeout(sock_connect=3, sock_read=30, total=45)
+            connector = aiohttp.TCPConnector(force_close=True)  # не переиспользовать соединения
+            
+            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
                 async with session.post(self._url, json=payload, headers=headers) as resp:
                     t_connect = time.time() - t0
                     log.debug(f"[LLM] Connected ({t_connect:.1f}s, status={resp.status})")
@@ -96,8 +108,8 @@ class LLMEngine:
                         return
 
                     buffer = ""
-                    sentence_enders = {".", "!", "?", "…", "\n"}
-                    clause_enders = {",", ";", ":", "—", " – "}
+                    sentence_enders = {".", "!", "?", "\u2026", "\n"}
+                    clause_enders = {",", ";", ":", "\u2014", " \u2013 "}
 
                     # Читаем SSE поток построчно
                     async for raw_line in resp.content:
@@ -148,11 +160,12 @@ class LLMEngine:
                         yield buffer.strip()
 
         except asyncio.TimeoutError:
-            log.warning(f"LLM timeout ({time.time() - t0:.1f}s)")
+            elapsed = time.time() - t0
+            log.warning(f"LLM timeout ({elapsed:.1f}s) — API не ответил")
         except aiohttp.ClientError as e:
-            log.warning(f"LLM connection error: {e}")
+            log.warning(f"LLM connection error ({time.time() - t0:.1f}s): {e}")
         except Exception as e:
-            log.error(f"LLM error: {e}")
+            log.error(f"LLM error ({time.time() - t0:.1f}s): {e}")
 
     async def generate(
         self,
