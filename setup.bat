@@ -82,9 +82,12 @@ echo.
 :: Install PyTorch
 if "%HAS_NVIDIA%"=="1" (
     :: Check if RTX 50xx series (needs nightly PyTorch with cu128)
+    :: Detect by CUDA compute capability - sm_120 = Blackwell (RTX 50xx)
     set IS_RTX50=0
-    for /f "tokens=*" %%g in ('nvidia-smi --query-gpu=name --format=csv,noheader 2^>nul') do (
-        echo %%g | findstr /i "50" >nul && set IS_RTX50=1
+    for /f "tokens=*" %%g in ('nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2^>nul') do (
+        for /f "tokens=1 delims=." %%m in ("%%g") do (
+            if %%m GEQ 12 set IS_RTX50=1
+        )
     )
     if "!IS_RTX50!"=="1" (
         echo [*] RTX 50xx detected - installing PyTorch nightly with CUDA 12.8...
