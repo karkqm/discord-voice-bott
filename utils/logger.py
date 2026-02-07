@@ -21,6 +21,7 @@ MODULE_STYLE = {
     "llm_engine":    (MAGENTA, "LLM"),
     "tts_engine":    (GREEN,   "TTS"),
     "stt_engine_v2": (YELLOW,  "STT"),
+    "stt_engine_v3": (YELLOW,  "STT"),
     "voice_player":  (BLUE,    "AUD"),
     "voice_receiver":(GRAY,    "MIC"),
     "conversation":  (WHITE,   "CTX"),
@@ -66,7 +67,7 @@ class CleanConsoleFormatter(logging.Formatter):
         return line
 
 
-def setup_logger(name: str = "discord-bot", level: int = logging.INFO) -> logging.Logger:
+def setup_logger(name: str = "discord-bot", level: int = logging.DEBUG) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(level)
 
@@ -75,9 +76,9 @@ def setup_logger(name: str = "discord-bot", level: int = logging.INFO) -> loggin
         if sys.platform == "win32":
             os.system("")
 
-        # Консоль — чистый формат
+        # Консоль — показываем debug для наших модулей
         console = logging.StreamHandler(sys.stdout)
-        console.setLevel(level)
+        console.setLevel(logging.DEBUG)
         console.setFormatter(CleanConsoleFormatter())
         logger.addHandler(console)
 

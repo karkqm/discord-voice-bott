@@ -18,6 +18,8 @@ class LLMEngine:
     def __init__(self, config: Config):
         self.config = config
         self._client: Optional[AsyncOpenAI] = None
+        self._cancel_event: asyncio.Event = asyncio.Event()
+        self._active_stream = None  # для принудительного закрытия
 
     def start(self) -> None:
         api_key = self.config.OPENAI_API_KEY
@@ -33,14 +35,19 @@ class LLMEngine:
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url if base_url else None,
-            timeout=httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=5.0),
-            max_retries=0,  # мы сами ретрайм
+            timeout=httpx.Timeout(connect=5.0, read=20.0, write=5.0, pool=10.0),
+            max_retries=0,
         )
         log.info(f"LLM engine started (model={self.config.LLM_MODEL}, base_url={base_url}, local={self.config.IS_LOCAL_LLM})")
 
     def stop(self) -> None:
+        self.cancel()
         self._client = None
         log.info("LLM engine stopped")
+
+    def cancel(self) -> None:
+        """Отменяет текущую генерацию. Безопасно вызывать из любого места."""
+        self._cancel_event.set()
 
     async def generate_stream(
         self,
@@ -80,7 +87,15 @@ class LLMEngine:
                 ],
             })
 
+        # Сбрасываем флаг отмены перед новым запросом
+        self._cancel_event.clear()
+        self._active_stream = None
+        stream = None
+
         try:
+            t0 = time.time()
+            log.debug("[LLM] Sending request...")
+            
             stream = await asyncio.wait_for(
                 self._client.chat.completions.create(
                     model=self.config.LLM_MODEL,
@@ -89,14 +104,23 @@ class LLMEngine:
                     temperature=self.config.LLM_TEMPERATURE,
                     stream=True,
                 ),
-                timeout=20.0,  # 20с — первый запрос может быть cold start (до 18с)
+                timeout=25.0,  # 25с — cold start до 18с + запас
             )
+            self._active_stream = stream
+            
+            t_connect = time.time() - t0
+            log.debug(f"[LLM] Stream connected ({t_connect:.1f}s)")
 
             buffer = ""
             sentence_enders = {".", "!", "?", "…", "\n"}
             clause_enders = {",", ";", ":", "—", " – "}
 
             async for chunk in stream:
+                # Проверяем отмену на каждом чанке
+                if self._cancel_event.is_set():
+                    log.debug("[LLM] Cancelled during streaming")
+                    break
+                    
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -122,13 +146,24 @@ class LLMEngine:
                         else:
                             break
 
-            if buffer.strip():
+            if not self._cancel_event.is_set() and buffer.strip():
                 yield buffer.strip()
 
         except asyncio.TimeoutError:
-            log.warning("LLM API timeout (20s)")
+            log.warning(f"LLM API timeout (25s)")
+        except asyncio.CancelledError:
+            log.debug("[LLM] Task cancelled")
         except Exception as e:
             log.error(f"LLM generation error: {e}")
+        finally:
+            # Всегда закрываем стрим чтобы освободить HTTP соединение
+            if stream is not None:
+                try:
+                    await stream.close()
+                    log.debug("[LLM] Stream closed")
+                except Exception:
+                    pass
+            self._active_stream = None
 
     async def generate(
         self,

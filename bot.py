@@ -66,6 +66,7 @@ stt_engine: Optional[STTEngine] = None
 
 # Генерация: одна активная задача
 _generation_task: Optional[asyncio.Task] = None
+_generation_lock = asyncio.Lock()
 
 # Команды "заткнись" — только прямые команды боту
 _SHUTUP_PATTERNS = [
@@ -126,10 +127,7 @@ async def handle_user_speech(text: str, user_id: int) -> None:
         if _is_shutup_command(text):
             log.info(f"{RED}🤐 {user_name}: {text} — замолкаю!{RESET}")
             conversation.add_user_message(text, user_name)
-            if _generation_task and not _generation_task.done():
-                _generation_task.cancel()
-            tts_engine.stop()
-            voice_player.stop()
+            await _stop_generation()
             return
 
         # Проверяем, обращаются ли к боту
@@ -144,23 +142,42 @@ async def handle_user_speech(text: str, user_id: int) -> None:
 
         log.info(f"{BOLD}{user_name}{RESET}: {text}")
 
-        # Если бот сейчас генерирует — останавливаем и начинаем заново с новым контекстом
+        # Если бот сейчас генерирует — останавливаем чисто и начинаем заново
         if _generation_task and not _generation_task.done():
-            _generation_task.cancel()
-            tts_engine.stop()
-            voice_player.stop()
             log.info(f"{YELLOW}[ПЕРЕЗАПУСК] Новое обращение, перегенерирую...{RESET}")
-            # Даём время на отмену
-            try:
-                await _generation_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            await _stop_generation()
         
         # Запускаем новую генерацию
         _generation_task = asyncio.create_task(_do_generate())
             
     except Exception as e:
         log.error(f"[PIPELINE] handle_user_speech error: {e}", exc_info=True)
+
+
+async def _stop_generation() -> None:
+    """Чисто останавливает текущую генерацию: LLM стрим, TTS, плеер."""
+    global _generation_task
+    
+    # 1. Отменяем LLM стрим через event (чистое закрытие HTTP)
+    llm_engine.cancel()
+    
+    # 2. Останавливаем TTS и плеер
+    tts_engine.stop()
+    voice_player.stop()
+    
+    # 3. Ждём завершения таска (он завершится быстро т.к. LLM стрим отменён)
+    if _generation_task and not _generation_task.done():
+        try:
+            await asyncio.wait_for(_generation_task, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            # Если не завершился за 2с — принудительно отменяем
+            _generation_task.cancel()
+            try:
+                await _generation_task
+            except (asyncio.CancelledError, Exception):
+                pass
+    _generation_task = None
+    log.debug("[STOP] Generation stopped cleanly")
 
 
 async def _do_generate() -> None:
@@ -171,7 +188,7 @@ async def _do_generate() -> None:
             include_minecraft=minecraft_bot.is_running if minecraft_bot else False
         )
     except asyncio.CancelledError:
-        log.debug("Generation cancelled")
+        log.debug("Generation task cancelled")
         return
     except Exception as e:
         log.error(f"[PIPELINE] generate error: {e}")
@@ -194,6 +211,8 @@ async def generate_and_speak(
     """Генерирует ответ LLM стримом и озвучивает каждое предложение сразу."""
     try:
         pipeline_start = time.time()
+        log.debug(f"[GEN] Pipeline start")
+        
         mc_context = minecraft_bot.get_status_info() if (include_minecraft and minecraft_bot) else None
         messages = conversation.get_messages(
             include_screen=include_screen,
@@ -209,6 +228,8 @@ async def generate_and_speak(
         sentence_count = 0
         t_llm_start = time.time()
         t_first_sentence = 0.0
+        
+        log.debug(f"[GEN] Calling LLM ({len(messages)} messages)")
 
         async for sentence in llm_engine.generate_stream(messages, screen_frame):
             # Проверяем на наличие команд Minecraft
