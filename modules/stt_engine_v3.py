@@ -27,7 +27,7 @@ VAD_CHUNK_BYTES = VAD_CHUNK_SAMPLES * 2  # 1024 bytes
 # Параметры определения речи
 SPEECH_THRESHOLD = 0.5       # порог VAD для определения речи
 SILENCE_DURATION = 0.4       # секунды тишины для завершения фразы
-MIN_SPEECH_DURATION = 0.3    # минимальная длительность речи
+MIN_SPEECH_DURATION = 0.5    # минимальная длительность речи
 MAX_SPEECH_DURATION = 30.0   # максимальная длительность (защита от зависания)
 
 
@@ -252,7 +252,7 @@ class STTEngine:
                 return
             
             # faster-whisper транскрипция
-            segments, info = self._whisper_model.transcribe(
+            segments_iter, info = self._whisper_model.transcribe(
                 audio_np,
                 language=self.language,
                 beam_size=1,
@@ -260,22 +260,33 @@ class STTEngine:
                 vad_filter=False,
             )
             
-            text = " ".join(seg.text.strip() for seg in segments).strip()
+            seg_list = list(segments_iter)
+            text = " ".join(seg.text.strip() for seg in seg_list).strip()
             
             t_transcribe = time.time()
             
             if not text or len(text) < 3:
                 return
             
+            # Фильтр по no_speech_prob (галлюцинации имеют высокий no_speech_prob)
+            if seg_list:
+                avg_no_speech = sum(s.no_speech_prob for s in seg_list) / len(seg_list)
+                if avg_no_speech > 0.6:
+                    log.debug(f"Filtered hallucination (no_speech={avg_no_speech:.2f}): {text}")
+                    return
+            
             # Фильтр мусора и галлюцинаций Whisper
             garbage = {
-                "субтитры сделал dimatorzok", "dimatorzok",
+                "субтитры сделал", "dimatorzok",
                 "продолжение следует", "спасибо за просмотр",
                 "подписывайтесь на канал", "www.moifilm.ru",
                 "редактор субтитров", "amara.org",
                 "[silence]", "silence", "thanks for watching",
-                "thank you for watching", "you", "the",
+                "thank you for watching",
                 "разговор на русском языке", "discord голосовом чате",
+                "до новых встреч", "спасибо за внимание",
+                "с вами был", "следующей части видео",
+                "смех", "labeling",
             }
             if any(g in text.lower() for g in garbage):
                 return

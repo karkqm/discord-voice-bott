@@ -63,18 +63,12 @@ minecraft_bot = MinecraftBot(bot_name=config.BOT_NAME) if MINECRAFT_AVAILABLE el
 # STT создаётся позже, т.к. нужны колбэки
 stt_engine: Optional[STTEngine] = None
 
-# Per-user processing: каждый юзер обрабатывается параллельно
-_user_locks: dict[int, asyncio.Lock] = {}  # user_id -> lock
+# Активные задачи генерации (одна на юзера, новая отменяет предыдущую)
 _user_tasks: dict[int, asyncio.Task] = {}  # user_id -> current generation task
 
 # Barge-in cooldown: не прерывать бота сразу после распознавания речи
 _last_stt_finish_time: float = 0.0
 _barge_in_cooldown_sec: float = 1.5  # секунды после распознавания
-
-def _get_user_lock(user_id: int) -> asyncio.Lock:
-    if user_id not in _user_locks:
-        _user_locks[user_id] = asyncio.Lock()
-    return _user_locks[user_id]
 
 
 # --- Callbacks ---
@@ -154,26 +148,25 @@ async def handle_user_speech(text: str, user_id: int) -> None:
 
         log.info(f"{BOLD}{user_name}{RESET}: {text}")
 
-        # Per-user lock: разные юзеры обрабатываются параллельно
-        user_lock = _get_user_lock(user_id)
-        
-        async with user_lock:
-            # Отменяем предыдущую задачу этого юзера если жива
-            prev_task = _user_tasks.get(user_id)
+        # Отменяем ВСЕ активные генерации (новое сообщение = новый контекст)
+        for uid, prev_task in list(_user_tasks.items()):
             if prev_task and not prev_task.done():
                 prev_task.cancel()
-                
-            task = asyncio.create_task(
-                generate_and_speak(
-                    include_screen=screen_capture.last_frame is not None,
-                    include_minecraft=minecraft_bot.is_running if minecraft_bot else False
-                )
+        
+        tts_engine.stop()
+        voice_player.stop()
+        
+        task = asyncio.create_task(
+            generate_and_speak(
+                include_screen=screen_capture.last_frame is not None,
+                include_minecraft=minecraft_bot.is_running if minecraft_bot else False
             )
-            _user_tasks[user_id] = task
-            try:
-                await task
-            except asyncio.CancelledError:
-                 log.info("Generation cancelled (barge-in)")
+        )
+        _user_tasks[user_id] = task
+        try:
+            await task
+        except asyncio.CancelledError:
+             log.info("Generation cancelled (barge-in)")
             
     except Exception as e:
         log.error(f"[PIPELINE] handle_user_speech error: {e}", exc_info=True)

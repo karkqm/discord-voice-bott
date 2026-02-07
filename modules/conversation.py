@@ -121,13 +121,12 @@ class Conversation:
             if alias.lower() in text_lower:
                 return True
         
-        # 2. Контекст диалога (ответ на вопрос бота)
-        if self._history:
-            last_msg = self._history[-1]
-            if last_msg["role"] == "assistant":
-                time_since_bot = time.time() - self._last_bot_speech_time
-                if time_since_bot < 10.0:  # 10 секунд на ответ
-                    return True
+        # 2. Контекст диалога — бот недавно говорил (ответ на вопрос бота)
+        # Не проверяем последнее сообщение — в мультиюзер чате другие юзеры
+        # могут говорить между ботом и ответом
+        time_since_bot = time.time() - self._last_bot_speech_time
+        if self._last_bot_speech_time > 0 and time_since_bot < 8.0:
+            return True
                     
         return False
 
