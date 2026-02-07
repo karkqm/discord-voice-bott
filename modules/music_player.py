@@ -142,8 +142,12 @@ class MusicPlayer:
             log.warning("[MUSIC] Not connected to voice")
             return None
         
-        # Останавливаем текущее воспроизведение
+        # Останавливаем текущее воспроизведение (музыка или TTS)
         self.stop()
+        # Также убеждаемся что voice client не играет ничего (TTS мог остаться)
+        if self._voice_client and self._voice_client.is_playing():
+            self._voice_client.stop()
+            await asyncio.sleep(0.2)
         
         # Ищем на YouTube
         log.info(f"[MUSIC] Searching: {query}")

@@ -79,6 +79,10 @@ AUTO_JOIN_CHANNEL_ID: int = int(os.getenv("AUTO_JOIN_CHANNEL_ID", "0"))
 # Текстовый канал для отправки ссылок (устанавливается при подключении)
 _text_channel: Optional[discord.TextChannel] = None
 
+# Пасхалка: Стендофф мем (состояние: 0=ждём, 1=сказали "идём в стендофф", 2=сказали "айди диктуй", 3=сказали "кто")
+_standoff_state: int = 0
+_standoff_timer: float = 0.0
+
 # Команды "заткнись" — только прямые команды боту
 _SHUTUP_PATTERNS = [
     r"\bзаткнись\b", r"\bзаткнитесь\b",
@@ -161,6 +165,17 @@ async def handle_user_speech(text: str, user_id: int) -> None:
 
         log.info(f"{BOLD}{user_name}{RESET}: {text}")
 
+        # === Пасхалка: Стендофф мем ===
+        standoff_resp = _check_standoff_easter_egg(text)
+        if standoff_resp:
+            tts_engine.stop()
+            voice_player.stop()
+            for line in standoff_resp:
+                tts_engine.feed(line)
+            voice_player.mark_done()
+            conversation.add_bot_message(" ".join(standoff_resp))
+            return
+
         # === Музыка: перехватываем до LLM ===
         music_req = is_music_request(text)
         if music_req:
@@ -187,6 +202,55 @@ async def handle_user_speech(text: str, user_id: int) -> None:
         log.error(f"[PIPELINE] handle_user_speech error: {e}", exc_info=True)
 
 
+def _check_standoff_easter_egg(text: str) -> Optional[list[str]]:
+    """Пасхалка: мем про Стендофф 2. Возвращает список фраз для TTS или None."""
+    global _standoff_state, _standoff_timer
+    
+    text_lower = text.lower().strip()
+    now = time.time()
+    
+    # Сброс если прошло больше 30 секунд с последнего шага
+    if _standoff_state > 0 and (now - _standoff_timer) > 30:
+        _standoff_state = 0
+    
+    # Шаг 1: "мы в стендофф идём" / "идём в стендофф" / "пошли в стендофф"
+    if _standoff_state == 0:
+        standoff_triggers = ["стендофф", "стэндофф", "стандофф", "standoff", "stand off"]
+        go_triggers = ["идём", "идем", "пошли", "погнали", "пойдём", "пойдем", "го в"]
+        has_standoff = any(t in text_lower for t in standoff_triggers)
+        has_go = any(t in text_lower for t in go_triggers)
+        if has_standoff and has_go:
+            _standoff_state = 1
+            _standoff_timer = now
+            log.info(f"{CYAN}[EASTER EGG] Standoff meme: stage 1{RESET}")
+            return ["ПОГНАЛИ!"]
+    
+    # Шаг 2: "айди диктуй" / "диктуй айди" / "ник скажи"
+    elif _standoff_state == 1:
+        if any(t in text_lower for t in ["айди", "ник ", "никнейм", "диктуй", "скажи ник", "как тебя"]):
+            _standoff_state = 2
+            _standoff_timer = now
+            log.info(f"{CYAN}[EASTER EGG] Standoff meme: stage 2{RESET}")
+            return ["ДАНИЛ КОЛБАСЕНКО!"]
+    
+    # Шаг 3: "кто?!" / "кто" / "чё"
+    elif _standoff_state == 2:
+        if any(t in text_lower for t in ["кто", "чё", "че ", "что", "какой"]):
+            _standoff_state = 3
+            _standoff_timer = now
+            log.info(f"{CYAN}[EASTER EGG] Standoff meme: stage 3{RESET}")
+            return ["ДАНИЛ КОЛБАСЕНКО!"]
+    
+    # Шаг 4: "я те щас дам нахуй" / "клянись"
+    elif _standoff_state == 3:
+        if any(t in text_lower for t in ["дам нахуй", "клянись", "клянусь", "я тебе", "я те "]):
+            _standoff_state = 0  # Сброс — мем завершён
+            log.info(f"{CYAN}[EASTER EGG] Standoff meme: COMPLETE!{RESET}")
+            return ["Я ТЕ ЩАС ДАМ НАХУЙ!", "ТЫ ЧЕ КЛЯНИСЬ!"]
+    
+    return None
+
+
 async def _handle_music_request(music_req: str, original_text: str) -> None:
     """Обрабатывает запрос на музыку."""
     if music_req == "__STOP__":
@@ -211,8 +275,10 @@ async def _handle_music_request(music_req: str, original_text: str) -> None:
     tts_engine.feed(f"Ищу {music_req}...")
     voice_player.mark_done()
     
-    # Ждём пока TTS доиграет
-    await asyncio.sleep(2.0)
+    # Ждём пока TTS "Ищу..." доиграет, потом останавливаем аудио
+    await asyncio.sleep(2.5)
+    tts_engine.stop()
+    voice_player.stop()
     
     # Передаём voice client музыкальному плееру
     music_player.set_voice_client(voice_player.voice_client)
