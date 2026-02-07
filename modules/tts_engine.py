@@ -75,10 +75,24 @@ class TTSEngine:
         log.debug(f"TTS feed: {text[:30]}...")
 
     def _on_chunk_wrapper(self, chunk: bytes):
-        """Обертка для колбэка, чтобы передавать sample_rate если нужно."""
-        if self.on_audio_chunk:
-            # EdgeTTS через RealtimeTTS дает 22050Hz mono 16-bit PCM.
-            self.on_audio_chunk(chunk, 22050)
+        """Обертка для колбэка — декодируем MP3 от EdgeTTS в PCM."""
+        if not self.on_audio_chunk:
+            return
+            
+        try:
+            # EdgeTTS через RealtimeTTS дает MP3 байты, не PCM!
+            # Декодируем MP3 -> PCM с помощью pydub
+            from pydub import AudioSegment
+            import io
+            
+            audio = AudioSegment.from_mp3(io.BytesIO(chunk))
+            # Конвертируем в нужный формат: 24kHz mono 16-bit
+            audio = audio.set_frame_rate(24000).set_channels(1).set_sample_width(2)
+            pcm_data = audio.raw_data
+            
+            self.on_audio_chunk(pcm_data, 24000)
+        except Exception as e:
+            log.error(f"MP3 decode error: {e}")
 
     def stop(self) -> None:
         """Останавливает чтение и очищает очередь."""
