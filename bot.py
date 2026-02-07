@@ -163,49 +163,38 @@ async def handle_user_speech(text: str, user_id: int) -> None:
 
 
 async def _generate_response_loop() -> None:
-    """Генерирует ответ и проверяет очередь после завершения (макс 2 ответа)."""
+    """Генерирует ответ и проверяет очередь после завершения."""
     global _pending_response
     
     _pending_response = False
-    timed_out = False
     try:
-        await asyncio.wait_for(
-            generate_and_speak(
-                include_screen=screen_capture.last_frame is not None,
-                include_minecraft=minecraft_bot.is_running if minecraft_bot else False
-            ),
-            timeout=20.0,
+        await generate_and_speak(
+            include_screen=screen_capture.last_frame is not None,
+            include_minecraft=minecraft_bot.is_running if minecraft_bot else False
         )
-    except asyncio.TimeoutError:
-        log.warning(f"{RED}[TIMEOUT] LLM не ответил за 20с, пропускаю{RESET}")
-        tts_engine.stop()
-        voice_player.mark_done()
-        timed_out = True
     except asyncio.CancelledError:
         log.info("Generation cancelled (shut up)")
-        voice_player.mark_done()
+        tts_engine.stop()
+        voice_player.stop()
         return
+    except Exception as e:
+        log.error(f"[PIPELINE] generate error: {e}")
     
-    # Если накопились сообщения И предыдущий вызов не тайм-аутнулся — отвечаем ещё раз
-    if _pending_response and not timed_out:
+    # Если накопились сообщения — отвечаем ещё раз
+    if _pending_response:
         log.info(f"{CYAN}[ОЧЕРЕДЬ] Отвечаю на накопившиеся сообщения...{RESET}")
         _pending_response = False
-        await asyncio.sleep(0.3)
         try:
-            await asyncio.wait_for(
-                generate_and_speak(
-                    include_screen=screen_capture.last_frame is not None,
-                    include_minecraft=minecraft_bot.is_running if minecraft_bot else False
-                ),
-                timeout=20.0,
+            await generate_and_speak(
+                include_screen=screen_capture.last_frame is not None,
+                include_minecraft=minecraft_bot.is_running if minecraft_bot else False
             )
-        except asyncio.TimeoutError:
-            log.warning(f"{RED}[TIMEOUT] LLM не ответил за 20с, пропускаю{RESET}")
-            tts_engine.stop()
-            voice_player.mark_done()
         except asyncio.CancelledError:
-            voice_player.mark_done()
+            tts_engine.stop()
+            voice_player.stop()
             return
+        except Exception as e:
+            log.error(f"[PIPELINE] generate error: {e}")
 
 
 async def handle_screen_comment(frame_b64: str) -> None:
@@ -310,18 +299,13 @@ async def generate_and_speak(
         if full_response.strip():
             conversation.add_bot_message(full_response.strip())
         
-        # Ждём пока TTS доиграет все фрагменты
+        # Ждём пока TTS досинтезирует все фрагменты
         if sentence_count > 0:
             await asyncio.get_event_loop().run_in_executor(
                 None, tts_engine.wait_until_done
             )
-        # Всегда сигнализируем плееру что данных больше не будет
+        # Сигнализируем плееру что данных больше не будет
         voice_player.mark_done()
-        # Ждём пока Discord доиграет буфер
-        for _ in range(100):  # макс 10 секунд
-            if not voice_player.is_playing:
-                break
-            await asyncio.sleep(0.1)
         
         total_time = time.time() - pipeline_start
         llm_ms = (t_first_sentence - t_llm_start) * 1000 if t_first_sentence else 0

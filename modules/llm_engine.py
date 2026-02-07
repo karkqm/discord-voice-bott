@@ -15,13 +15,9 @@ log = setup_logger("llm_engine")
 class LLMEngine:
     """Генерация ответов через OpenAI API с поддержкой стриминга и vision."""
 
-    # Минимальный интервал между запросами (rate limit protection)
-    _MIN_REQUEST_INTERVAL = 3.0  # секунды
-
     def __init__(self, config: Config):
         self.config = config
         self._client: Optional[AsyncOpenAI] = None
-        self._last_request_time: float = 0.0
 
     def start(self) -> None:
         api_key = self.config.OPENAI_API_KEY
@@ -83,14 +79,6 @@ class LLMEngine:
                     },
                 ],
             })
-
-        # Rate limit: ждём минимальный интервал между запросами
-        elapsed = time.time() - self._last_request_time
-        if elapsed < self._MIN_REQUEST_INTERVAL:
-            wait = self._MIN_REQUEST_INTERVAL - elapsed
-            log.debug(f"Rate limit cooldown: {wait:.1f}s")
-            await asyncio.sleep(wait)
-        self._last_request_time = time.time()
 
         # Ретрай: 2 попытки с таймаутом 10с каждая
         for attempt in range(2):
