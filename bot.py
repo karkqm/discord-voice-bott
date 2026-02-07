@@ -1,4 +1,5 @@
 import asyncio
+import re
 import threading
 import time
 from typing import Optional
@@ -67,13 +68,13 @@ stt_engine: Optional[STTEngine] = None
 _generation_task: Optional[asyncio.Task] = None
 _pending_response: bool = False  # есть новые addressed сообщения для ответа
 
-# Команды "заткнись"
-_SHUTUP_PHRASES = {
-    "заткнись", "заткнитесь", "помолчи", "замолчи",
-    "замолкни", "тихо", "стоп", "хватит",
-    "закрой рот", "завали", "завались",
-    "shut up", "stfu", "молчи", "не говори",
-}
+# Команды "заткнись" — только прямые команды боту
+_SHUTUP_PATTERNS = [
+    r"\bзаткнись\b", r"\bзаткнитесь\b",
+    r"\bпомолчи\b", r"\bзамолчи\b", r"\bзамолкни\b",
+    r"\bзакрой рот\b", r"\bзавали\b",
+    r"\bshut up\b", r"\bstfu\b",
+]
 
 
 # --- Callbacks ---
@@ -89,8 +90,8 @@ def on_stt_text_ready(text: str, user_id: int) -> None:
 def _is_shutup_command(text: str) -> bool:
     """Проверяет, просят ли бота замолчать."""
     text_lower = text.lower().strip()
-    for phrase in _SHUTUP_PHRASES:
-        if phrase in text_lower:
+    for pattern in _SHUTUP_PATTERNS:
+        if re.search(pattern, text_lower):
             return True
     return False
 
@@ -177,8 +178,11 @@ async def _generate_response_loop() -> None:
             )
         except asyncio.TimeoutError:
             log.warning(f"{RED}[TIMEOUT] LLM не ответил за 30с, пропускаю{RESET}")
+            tts_engine.stop()
+            voice_player.mark_done()
         except asyncio.CancelledError:
             log.info("Generation cancelled (shut up)")
+            voice_player.mark_done()
             return
         
         # После ответа проверяем: накопились ли новые сообщения?
@@ -297,13 +301,13 @@ async def generate_and_speak(
             await asyncio.get_event_loop().run_in_executor(
                 None, tts_engine.wait_until_done
             )
-            # Сигнализируем плееру что данных больше не будет
-            voice_player.mark_done()
-            # Ждём пока Discord доиграет буфер
-            for _ in range(300):  # макс 30 секунд
-                if not voice_player.is_playing:
-                    break
-                await asyncio.sleep(0.1)
+        # Всегда сигнализируем плееру что данных больше не будет
+        voice_player.mark_done()
+        # Ждём пока Discord доиграет буфер
+        for _ in range(100):  # макс 10 секунд
+            if not voice_player.is_playing:
+                break
+            await asyncio.sleep(0.1)
         
         total_time = time.time() - pipeline_start
         llm_ms = (t_first_sentence - t_llm_start) * 1000 if t_first_sentence else 0
