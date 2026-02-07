@@ -21,9 +21,8 @@ log = setup_logger("stt_engine_v2")
 
 # VAD параметры
 VAD_SAMPLE_RATE = 16000
-VAD_CHUNK_MS = 30  # Silero VAD работает с чанками 30ms
-VAD_CHUNK_SAMPLES = VAD_SAMPLE_RATE * VAD_CHUNK_MS // 1000  # 480 samples
-VAD_CHUNK_BYTES = VAD_CHUNK_SAMPLES * 2  # int16 = 2 bytes
+VAD_CHUNK_SAMPLES = 512  # Silero VAD требует ровно 512 сэмплов для 16kHz
+VAD_CHUNK_BYTES = VAD_CHUNK_SAMPLES * 2  # 1024 bytes
 
 # Параметры определения речи
 SPEECH_THRESHOLD = 0.5       # порог VAD для определения речи
