@@ -166,8 +166,31 @@ async def _generate_response_loop() -> None:
     """Генерирует ответ и проверяет очередь после завершения (макс 2 ответа)."""
     global _pending_response
     
-    for _ in range(2):  # макс 2 ответа: текущий + накопившиеся
+    _pending_response = False
+    timed_out = False
+    try:
+        await asyncio.wait_for(
+            generate_and_speak(
+                include_screen=screen_capture.last_frame is not None,
+                include_minecraft=minecraft_bot.is_running if minecraft_bot else False
+            ),
+            timeout=20.0,
+        )
+    except asyncio.TimeoutError:
+        log.warning(f"{RED}[TIMEOUT] LLM не ответил за 20с, пропускаю{RESET}")
+        tts_engine.stop()
+        voice_player.mark_done()
+        timed_out = True
+    except asyncio.CancelledError:
+        log.info("Generation cancelled (shut up)")
+        voice_player.mark_done()
+        return
+    
+    # Если накопились сообщения И предыдущий вызов не тайм-аутнулся — отвечаем ещё раз
+    if _pending_response and not timed_out:
+        log.info(f"{CYAN}[ОЧЕРЕДЬ] Отвечаю на накопившиеся сообщения...{RESET}")
         _pending_response = False
+        await asyncio.sleep(0.3)
         try:
             await asyncio.wait_for(
                 generate_and_speak(
@@ -181,15 +204,8 @@ async def _generate_response_loop() -> None:
             tts_engine.stop()
             voice_player.mark_done()
         except asyncio.CancelledError:
-            log.info("Generation cancelled (shut up)")
             voice_player.mark_done()
             return
-        
-        # Если накопились сообщения — отвечаем ещё раз
-        if not _pending_response:
-            break
-        log.info(f"{CYAN}[ОЧЕРЕДЬ] Отвечаю на накопившиеся сообщения...{RESET}")
-        await asyncio.sleep(0.3)
 
 
 async def handle_screen_comment(frame_b64: str) -> None:

@@ -116,17 +116,10 @@ class Conversation:
         """Определяет, обращено ли сообщение к боту."""
         text_lower = text.lower()
         
-        # 1. Прямое обращение по имени
+        # Прямое обращение по имени — единственный способ обратиться к боту
         for alias in self.config.BOT_ALIASES:
             if alias.lower() in text_lower:
                 return True
-        
-        # 2. Контекст диалога — бот недавно говорил (ответ на вопрос бота)
-        # Не проверяем последнее сообщение — в мультиюзер чате другие юзеры
-        # могут говорить между ботом и ответом
-        time_since_bot = time.time() - self._last_bot_speech_time
-        if self._last_bot_speech_time > 0 and time_since_bot < 8.0:
-            return True
                     
         return False
 
