@@ -1,3 +1,4 @@
+import random
 import time
 from typing import Optional
 from collections import deque
@@ -23,6 +24,8 @@ class Conversation:
         self._last_bot_speech_time: float = 0
         self._last_screen_comment_time: float = 0
         self._screen_comment_cooldown: float = 15.0  # секунд между комментариями экрана
+        self._msgs_since_bot_spoke: int = 0  # сколько сообщений прошло без ответа бота
+        self._interject_cooldown: float = 10.0  # минимум секунд между авто-вмешательствами
 
     def get_messages(self, include_screen: bool = False, minecraft_context: Optional[str] = None) -> list[dict]:
         """Возвращает историю сообщений в формате OpenAI API.
@@ -68,7 +71,8 @@ class Conversation:
             "content": f"[{user_name}]: {text}",
         })
         self._last_user_speech_time = time.time()
-        log.debug(f"User message added: [{user_name}]: {text}")
+        self._msgs_since_bot_spoke += 1
+        log.debug(f"User message added: [{user_name}]: {text} (msgs_since_bot={self._msgs_since_bot_spoke})")
 
     def add_bot_message(self, text: str) -> None:
         """Добавляет ответ бота в историю."""
@@ -77,6 +81,7 @@ class Conversation:
             "content": text,
         })
         self._last_bot_speech_time = time.time()
+        self._msgs_since_bot_spoke = 0
         log.debug(f"Bot message added: {text[:50]}...")
 
     def add_screen_context(self, description: str) -> None:
@@ -116,11 +121,44 @@ class Conversation:
         """Определяет, обращено ли сообщение к боту."""
         text_lower = text.lower()
         
-        # Прямое обращение по имени — единственный способ обратиться к боту
         for alias in self.config.BOT_ALIASES:
             if alias.lower() in text_lower:
                 return True
                     
+        return False
+
+    def should_auto_interject(self) -> bool:
+        """Определяет, стоит ли боту самому встрять в разговор.
+        
+        Вероятность растёт с количеством сообщений без ответа:
+        - 3-4 сообщения: 15%
+        - 5-6 сообщений: 30%
+        - 7+ сообщений: 50%
+        Плюс кулдаун — не чаще раз в 10 секунд.
+        """
+        now = time.time()
+        time_since_bot = now - self._last_bot_speech_time
+        
+        # Кулдаун: не встреваем слишком часто
+        if time_since_bot < self._interject_cooldown:
+            return False
+        
+        msgs = self._msgs_since_bot_spoke
+        
+        if msgs < 3:
+            return False
+        elif msgs <= 4:
+            prob = 0.15
+        elif msgs <= 6:
+            prob = 0.30
+        else:
+            prob = 0.50
+        
+        roll = random.random()
+        if roll < prob:
+            log.debug(f"Auto-interject triggered (msgs={msgs}, prob={prob:.0%}, roll={roll:.2f})")
+            return True
+        
         return False
 
     @property

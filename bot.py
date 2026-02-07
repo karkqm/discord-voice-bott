@@ -140,8 +140,13 @@ async def handle_user_speech(text: str, user_id: int) -> None:
         conversation.add_user_message(text, user_name)
 
         if not is_addressed:
-            log.info(f"{GRAY}{user_name}: {text}{RESET}")
-            return
+            # Может бот сам хочет встрять?
+            if conversation.should_auto_interject():
+                log.info(f"{CYAN}[ВСТРЕВАЮ] {user_name}: {text}{RESET}")
+                is_addressed = True
+            else:
+                log.info(f"{GRAY}{user_name}: {text}{RESET}")
+                return
 
         log.info(f"{BOLD}{user_name}{RESET}: {text}")
 
