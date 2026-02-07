@@ -1,8 +1,6 @@
-"""Веб-поиск: LLM переформулирует запрос → Brave Search (или DuckDuckGo фоллбэк)."""
+"""Веб-поиск: LLM переформулирует запрос → DuckDuckGo ищет."""
 
 import asyncio
-import json
-import os
 import re
 import time
 from typing import Optional
@@ -13,10 +11,6 @@ from utils.logger import setup_logger
 
 log = setup_logger("web_search")
 
-# Brave Search API (бесплатно 2000 запросов/мес, отличное качество)
-BRAVE_API_KEY: str = os.getenv("BRAVE_API_KEY", "")
-
-# DuckDuckGo как фоллбэк
 try:
     from duckduckgo_search import DDGS
     DDG_AVAILABLE = True
@@ -36,12 +30,7 @@ def init(api_key: str, base_url: str, model: str) -> None:
     _llm_base_url = base_url.rstrip("/")
     _llm_model = model
     
-    engines = []
-    if BRAVE_API_KEY:
-        engines.append("Brave")
-    if DDG_AVAILABLE:
-        engines.append("DuckDuckGo")
-    log.info(f"[SEARCH] Engines: {', '.join(engines) or 'NONE'}. LLM rewrite: {'yes' if _llm_api_key else 'no'}")
+    log.info(f"[SEARCH] Engine: {'DuckDuckGo' if DDG_AVAILABLE else 'NONE'}. LLM rewrite: {'yes' if _llm_api_key else 'no'}")
 
 
 # ─── LLM Query Rewriter ───────────────────────────────────────────────
@@ -110,50 +99,7 @@ async def _rewrite_query_llm(query: str) -> Optional[str]:
         return None
 
 
-# ─── Search Engines ────────────────────────────────────────────────────
-
-async def _brave_search(query: str, max_results: int = 5) -> Optional[list[dict]]:
-    """Поиск через Brave Search API."""
-    if not BRAVE_API_KEY:
-        return None
-    
-    try:
-        connector = aiohttp.TCPConnector(force_close=True)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            resp = await asyncio.wait_for(
-                session.get(
-                    "https://api.search.brave.com/res/v1/web/search",
-                    params={"q": query, "count": max_results},
-                    headers={
-                        "Accept": "application/json",
-                        "Accept-Encoding": "gzip",
-                        "X-Subscription-Token": BRAVE_API_KEY,
-                    },
-                ).__aenter__(),
-                timeout=5.0,
-            )
-            
-            if resp.status != 200:
-                log.warning(f"[BRAVE] Error {resp.status}")
-                return None
-            
-            data = await resp.json()
-            results = []
-            for item in (data.get("web", {}).get("results", []))[:max_results]:
-                results.append({
-                    "title": item.get("title", ""),
-                    "body": item.get("description", ""),
-                    "href": item.get("url", ""),
-                })
-            return results if results else None
-            
-    except asyncio.TimeoutError:
-        log.warning("[BRAVE] Timeout (5s)")
-        return None
-    except Exception as e:
-        log.warning(f"[BRAVE] Error: {e}")
-        return None
-
+# ─── Search Engine ─────────────────────────────────────────────────────
 
 async def _ddg_search(query: str, max_results: int = 5) -> Optional[list[dict]]:
     """Поиск через DuckDuckGo (фоллбэк)."""
@@ -185,26 +131,15 @@ def _ddg_sync(query: str, max_results: int) -> list[dict]:
 # ─── Main Search Function ─────────────────────────────────────────────
 
 async def search(query: str, max_results: int = 5) -> Optional[str]:
-    """Ищет в интернете: LLM переформулирует → Brave/DDG ищет."""
+    """Ищет в интернете: LLM переформулирует → DuckDuckGo ищет."""
     t0 = time.time()
     
     # Шаг 1: LLM переформулирует запрос на английский
     rewritten = await _rewrite_query_llm(query)
     search_query = rewritten or query  # фоллбэк на оригинал
     
-    # Шаг 2: Ищем — сначала Brave, потом DDG
-    results = None
-    engine = ""
-    
-    if BRAVE_API_KEY:
-        results = await _brave_search(search_query, max_results)
-        if results:
-            engine = "Brave"
-    
-    if not results and DDG_AVAILABLE:
-        results = await _ddg_search(search_query, max_results)
-        if results:
-            engine = "DDG"
+    # Шаг 2: Ищем через DuckDuckGo
+    results = await _ddg_search(search_query, max_results)
     
     elapsed = (time.time() - t0) * 1000
     

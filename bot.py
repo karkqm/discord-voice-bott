@@ -249,7 +249,6 @@ async def _handle_link_request(text: str) -> None:
         log.warning("[LINK] No text channel set")
         return
     
-    # Используем web_search для поиска
     query = text.lower()
     for word in ["скинь", "кинь", "дай", "отправь", "ссылку", "линк", "в чат", "на", "андрей", "алекс", "бот"]:
         query = query.replace(word, "")
@@ -260,24 +259,12 @@ async def _handle_link_request(text: str) -> None:
     
     log.info(f"{CYAN}[LINK] Searching for: {query}{RESET}")
     
-    results = await web_search.search(query)
-    if results:
-        # Извлекаем первую ссылку из результатов
-        # Результаты в формате "1. Title: Body"
-        # Нам нужно найти URL — делаем отдельный поиск
-        pass
-    
-    # Прямой поиск через web_search для получения URL
-    from modules.web_search import _rewrite_query_llm, _brave_search, _ddg_search, BRAVE_API_KEY, DDG_AVAILABLE
+    from modules.web_search import _rewrite_query_llm, _ddg_search
     
     rewritten = await _rewrite_query_llm(query)
     search_query = rewritten or query
     
-    results_raw = None
-    if BRAVE_API_KEY:
-        results_raw = await _brave_search(search_query, 3)
-    if not results_raw and DDG_AVAILABLE:
-        results_raw = await _ddg_search(search_query, 3)
+    results_raw = await _ddg_search(search_query, 3)
     
     if results_raw:
         lines = []
