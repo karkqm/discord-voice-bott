@@ -77,8 +77,8 @@ class TTSEngine:
     def _on_chunk_wrapper(self, chunk: bytes):
         """Обертка для колбэка, чтобы передавать sample_rate если нужно."""
         if self.on_audio_chunk:
-            # EdgeTTS дает 24000Hz mono (обычно).
-            self.on_audio_chunk(chunk, 24000)
+            # EdgeTTS через RealtimeTTS дает 22050Hz mono 16-bit PCM.
+            self.on_audio_chunk(chunk, 22050)
 
     def stop(self) -> None:
         """Останавливает чтение и очищает очередь."""
