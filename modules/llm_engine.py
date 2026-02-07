@@ -1,10 +1,10 @@
 import asyncio
 import base64
+import json
 import time
 from typing import AsyncGenerator, Optional
 
-import httpx
-from openai import AsyncOpenAI
+import aiohttp
 
 from config import Config
 from utils.logger import setup_logger
@@ -13,39 +13,28 @@ log = setup_logger("llm_engine")
 
 
 class LLMEngine:
-    """Генерация ответов через OpenAI API с поддержкой стриминга и vision."""
+    """Генерация ответов через raw HTTP (как curl). Без openai SDK, без connection pool."""
 
     def __init__(self, config: Config):
         self.config = config
-        self._client: Optional[AsyncOpenAI] = None
         self._api_key: str = ""
-        self._base_url: Optional[str] = None
-
-    def _create_client(self) -> AsyncOpenAI:
-        """Создаёт новый httpx клиент. Вызывается при старте и после ошибок."""
-        return AsyncOpenAI(
-            api_key=self._api_key,
-            base_url=self._base_url,
-            timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0),
-            max_retries=0,
-        )
+        self._base_url: str = ""
+        self._url: str = ""
 
     def start(self) -> None:
         self._api_key = self.config.OPENAI_API_KEY or ""
-        self._base_url = self.config.OPENAI_BASE_URL or None
+        self._base_url = (self.config.OPENAI_BASE_URL or "https://api.openai.com/v1").rstrip("/")
+        self._url = f"{self._base_url}/chat/completions"
 
-        if not self._api_key and not self._base_url:
-             log.warning("No OPENAI_API_KEY or OPENAI_BASE_URL set. LLM might fail.")
+        if not self._api_key:
+            if self.config.IS_LOCAL_LLM:
+                self._api_key = "local"
+            else:
+                log.warning("No OPENAI_API_KEY set. LLM might fail.")
 
-        # Для локальных LLM ключ может быть любым, но не пустым
-        if self.config.IS_LOCAL_LLM and not self._api_key:
-            self._api_key = "local"
-
-        self._client = self._create_client()
-        log.info(f"LLM engine started (model={self.config.LLM_MODEL}, base_url={self._base_url}, local={self.config.IS_LOCAL_LLM})")
+        log.info(f"LLM engine started (model={self.config.LLM_MODEL}, url={self._url}, local={self.config.IS_LOCAL_LLM})")
 
     def stop(self) -> None:
-        self._client = None
         log.info("LLM engine stopped")
 
     async def generate_stream(
@@ -53,19 +42,10 @@ class LLMEngine:
         messages: list[dict],
         image_base64: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
-        """Стриминговая генерация ответа, отдаёт текст по предложениям.
+        """Стриминговая генерация — raw HTTP SSE, как curl.
         
-        Args:
-            messages: История сообщений в формате OpenAI
-            image_base64: Опциональный скриншот экрана в base64
-            
-        Yields:
-            Текст по предложениям (для быстрого начала TTS)
+        Каждый вызов = новое TCP соединение. Никакого connection pool.
         """
-        if not self._client:
-            log.error("LLM engine not started")
-            return
-
         # Если есть скриншот, добавляем его к последнему сообщению
         request_messages = list(messages)
         if image_base64:
@@ -86,72 +66,93 @@ class LLMEngine:
                 ],
             })
 
-        stream = None
-        error_occurred = False
+        payload = {
+            "model": self.config.LLM_MODEL,
+            "messages": request_messages,
+            "max_tokens": self.config.LLM_MAX_TOKENS,
+            "temperature": self.config.LLM_TEMPERATURE,
+            "stream": True,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+        }
+        
+        # Таймаут: connect 10s, total 60s (cold start до 18с + генерация)
+        timeout = aiohttp.ClientTimeout(sock_connect=10, total=60)
+
+        t0 = time.time()
+        log.debug("[LLM] Sending request...")
 
         try:
-            t0 = time.time()
-            log.debug("[LLM] Sending request...")
-            
-            # Не используем asyncio.wait_for — httpx сам обрабатывает таймауты
-            # connect=10s, read=30s — достаточно для cold start (до 18с)
-            stream = await self._client.chat.completions.create(
-                model=self.config.LLM_MODEL,
-                messages=request_messages,
-                max_tokens=self.config.LLM_MAX_TOKENS,
-                temperature=self.config.LLM_TEMPERATURE,
-                stream=True,
-            )
-            
-            t_connect = time.time() - t0
-            log.debug(f"[LLM] Stream connected ({t_connect:.1f}s)")
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(self._url, json=payload, headers=headers) as resp:
+                    t_connect = time.time() - t0
+                    log.debug(f"[LLM] Connected ({t_connect:.1f}s, status={resp.status})")
+                    
+                    if resp.status != 200:
+                        body = await resp.text()
+                        log.warning(f"LLM API error {resp.status}: {body[:200]}")
+                        return
 
-            buffer = ""
-            sentence_enders = {".", "!", "?", "…", "\n"}
-            clause_enders = {",", ";", ":", "—", " – "}
+                    buffer = ""
+                    sentence_enders = {".", "!", "?", "…", "\n"}
+                    clause_enders = {",", ";", ":", "—", " – "}
 
-            async for chunk in stream:
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
-                if delta.content:
-                    buffer += delta.content
-
-                    while True:
-                        split_pos = -1
+                    # Читаем SSE поток построчно
+                    async for raw_line in resp.content:
+                        line = raw_line.decode("utf-8", errors="ignore").strip()
                         
-                        for i, char in enumerate(buffer):
-                            if char in sentence_enders:
-                                split_pos = i
-                                break
-                            if char in clause_enders and i >= 15:
-                                split_pos = i
-                                break
-
-                        if split_pos >= 0:
-                            sentence = buffer[: split_pos + 1].strip()
-                            buffer = buffer[split_pos + 1 :]
-                            if sentence:
-                                yield sentence
-                        else:
+                        if not line or line.startswith(":"):
+                            continue
+                        if line == "data: [DONE]":
                             break
+                        if not line.startswith("data: "):
+                            continue
+                        
+                        try:
+                            chunk = json.loads(line[6:])  # убираем "data: "
+                        except json.JSONDecodeError:
+                            continue
+                        
+                        choices = chunk.get("choices", [])
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta", {})
+                        content = delta.get("content", "")
+                        if not content:
+                            continue
+                        
+                        buffer += content
 
-            if buffer.strip():
-                yield buffer.strip()
+                        while True:
+                            split_pos = -1
+                            
+                            for i, char in enumerate(buffer):
+                                if char in sentence_enders:
+                                    split_pos = i
+                                    break
+                                if char in clause_enders and i >= 15:
+                                    split_pos = i
+                                    break
 
+                            if split_pos >= 0:
+                                sentence = buffer[: split_pos + 1].strip()
+                                buffer = buffer[split_pos + 1 :]
+                                if sentence:
+                                    yield sentence
+                            else:
+                                break
+
+                    if buffer.strip():
+                        yield buffer.strip()
+
+        except asyncio.TimeoutError:
+            log.warning(f"LLM timeout ({time.time() - t0:.1f}s)")
+        except aiohttp.ClientError as e:
+            log.warning(f"LLM connection error: {e}")
         except Exception as e:
-            error_occurred = True
-            log.warning(f"LLM error: {e}")
-        finally:
-            if stream is not None:
-                try:
-                    await stream.close()
-                except Exception:
-                    pass
-            # После любой ошибки — пересоздаём клиент (сбрасываем connection pool)
-            if error_occurred:
-                log.debug("[LLM] Recreating client (reset connection pool)")
-                self._client = self._create_client()
+            log.error(f"LLM error: {e}")
 
     async def generate(
         self,
