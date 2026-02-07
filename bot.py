@@ -223,14 +223,20 @@ async def generate_and_speak(
         
         search_query = web_search.needs_search(last_user_text)
         if search_query:
-            log.debug(f"[GEN] Web search: {search_query}")
+            log.info(f"{CYAN}[SEARCH] {search_query}{RESET}")
             search_results = await web_search.search(search_query)
             if search_results:
                 messages.append({
                     "role": "system",
-                    "content": f"[Результаты поиска в интернете по запросу \"{search_query}\"]:\n{search_results}\n\nИспользуй эту информацию для ответа. Отвечай коротко и по делу.",
+                    "content": (
+                        f"[Результаты поиска в интернете]:\n{search_results}\n\n"
+                        "ВАЖНО: Ответь на вопрос пользователя ИСПОЛЬЗУЯ эти результаты поиска. "
+                        "Перескажи найденную информацию своими словами, коротко и по делу."
+                    ),
                 })
-                log.debug(f"[GEN] Search results injected")
+                log.info(f"{GREEN}[SEARCH] Results injected{RESET}")
+            else:
+                log.info(f"{YELLOW}[SEARCH] No results{RESET}")
 
         screen_frame = image_base64 or (
             screen_capture.last_frame if include_screen else None
