@@ -61,12 +61,18 @@ minecraft_bot = MinecraftBot(bot_name=config.BOT_NAME) if MINECRAFT_AVAILABLE el
 # STT создаётся позже, т.к. нужны колбэки
 stt_engine: Optional[STTEngine] = None
 
-# Флаг обработки (чтобы не обрабатывать параллельно)
-_processing_lock = asyncio.Lock()
+# Per-user processing: каждый юзер обрабатывается параллельно
+_user_locks: dict[int, asyncio.Lock] = {}  # user_id -> lock
+_user_tasks: dict[int, asyncio.Task] = {}  # user_id -> current generation task
 
 # Barge-in cooldown: не прерывать бота сразу после распознавания речи
 _last_stt_finish_time: float = 0.0
 _barge_in_cooldown_sec: float = 1.5  # секунды после распознавания
+
+def _get_user_lock(user_id: int) -> asyncio.Lock:
+    if user_id not in _user_locks:
+        _user_locks[user_id] = asyncio.Lock()
+    return _user_locks[user_id]
 
 
 # --- Callbacks ---
@@ -103,11 +109,11 @@ def on_user_speech_begin() -> None:
     # 2. Останавливаем TTS генерацию
     tts_engine.stop()
     
-    # 3. Отменяем генерацию LLM если идёт
-    global generation_task
-    if generation_task and not generation_task.done():
-        generation_task.cancel()
-        log.info("[BARGE-IN] LLM generation cancelled")
+    # 3. Отменяем все активные генерации
+    for uid, task in _user_tasks.items():
+        if task and not task.done():
+            task.cancel()
+            log.info(f"[BARGE-IN] LLM generation cancelled for user {uid}")
 
 
 def on_voice_audio_chunk(audio_data: bytes, user_id: int) -> None:
@@ -125,12 +131,10 @@ def on_screen_frame_ready(frame_b64: str) -> None:
         )
 
 
-# Глобальная задача генерации (для отмены)
-generation_task: Optional[asyncio.Task] = None
-
 async def handle_user_speech(text: str, user_id: int) -> None:
     """Обрабатывает распознанную речь пользователя."""
     try:
+        t_start = time.time()
         user_name = f"User_{user_id}"
         for guild in bot.guilds:
             member = guild.get_member(user_id)
@@ -148,26 +152,32 @@ async def handle_user_speech(text: str, user_id: int) -> None:
             log.info(f"Ignoring speech (not addressed to bot): {text}")
             return
 
-        async with _processing_lock:
-            log.info(f"[PIPELINE] Processing speech from {user_id}: {text}")
+        # Per-user lock: разные юзеры обрабатываются параллельно
+        user_lock = _get_user_lock(user_id)
+        
+        async with user_lock:
+            log.info(f"[PIPELINE] Processing speech from {user_id} ({user_name}): {text}")
+            log.info(f"[TIMING] Lock acquired in {(time.time()-t_start)*1000:.0f}ms")
             
-            global generation_task
-            # Отменяем предыдущую задачу если вдруг жива
-            if generation_task and not generation_task.done():
-                generation_task.cancel()
+            # Отменяем предыдущую задачу этого юзера если жива
+            prev_task = _user_tasks.get(user_id)
+            if prev_task and not prev_task.done():
+                prev_task.cancel()
                 
-            generation_task = asyncio.create_task(
+            task = asyncio.create_task(
                 generate_and_speak(
                     include_screen=screen_capture.last_frame is not None,
                     include_minecraft=minecraft_bot.is_running if minecraft_bot else False
                 )
             )
+            _user_tasks[user_id] = task
             try:
-                await generation_task
+                await task
             except asyncio.CancelledError:
                  log.info("[PIPELINE] Handle speech cancelled (barge-in or new request)")
             
-            log.info("[PIPELINE] Speech processing complete")
+            total = (time.time() - t_start) * 1000
+            log.info(f"[PIPELINE] Speech processing complete ({total:.0f}ms total)")
             
     except Exception as e:
         log.error(f"[PIPELINE] handle_user_speech error: {e}", exc_info=True)
@@ -175,13 +185,11 @@ async def handle_user_speech(text: str, user_id: int) -> None:
 
 async def handle_screen_comment(frame_b64: str) -> None:
     """Генерирует комментарий к экрану."""
-    async with _processing_lock:
-        # messages = conversation.get_messages(include_screen=True) # Logic moved to generate_and_speak
-        await generate_and_speak(
-            image_base64=frame_b64,
-            include_screen=True,
-            include_minecraft=minecraft_bot.is_running if minecraft_bot else False
-        )
+    await generate_and_speak(
+        image_base64=frame_b64,
+        include_screen=True,
+        include_minecraft=minecraft_bot.is_running if minecraft_bot else False
+    )
 
 
 async def generate_and_speak(
@@ -197,13 +205,16 @@ async def generate_and_speak(
             include_screen=include_screen,
             minecraft_context=mc_context
         )
-        log.info(f"[PIPELINE] generate_and_speak: {len(messages)} messages")
+        t_context = time.time()
+        log.info(f"[PIPELINE] generate_and_speak: {len(messages)} messages (context built in {(t_context-pipeline_start)*1000:.0f}ms)")
 
         screen_frame = image_base64 or (
             screen_capture.last_frame if include_screen else None
         )
 
         full_response = ""
+        first_sentence = True
+        t_llm_start = time.time()
         log.info("[PIPELINE] Starting LLM stream...")
 
         async for sentence in llm_engine.generate_stream(messages, screen_frame):
@@ -264,7 +275,12 @@ async def generate_and_speak(
                     log.error(f"[MC-Command] Error: {mc_err}")
 
             full_response += " " + sentence
-            log.info(f"[PIPELINE] LLM sentence: {sentence}")
+            t_sentence = time.time()
+            if first_sentence:
+                log.info(f"[TIMING] LLM first sentence in {(t_sentence-t_llm_start)*1000:.0f}ms: {sentence}")
+                first_sentence = False
+            else:
+                log.info(f"[PIPELINE] LLM sentence: {sentence}")
 
             # Отправляем в TTS (стриминг начнётся через колбэк)
             tts_engine.feed(sentence)
