@@ -17,6 +17,7 @@ from modules.tts_engine import TTSEngine
 from modules.voice_player import VoicePlayer
 from modules.screen_capture import ScreenCapture
 from modules.conversation import Conversation
+from modules.minecraft_bot import MinecraftBot
 from utils.logger import setup_logger
 
 log = setup_logger("bot")
@@ -43,6 +44,7 @@ voice_player = VoicePlayer()
 screen_capture = ScreenCapture(
     interval=config.SCREEN_CAPTURE_INTERVAL,
 )
+minecraft_bot = MinecraftBot(bot_name=config.BOT_NAME)
 
 # STT создаётся позже, т.к. нужны колбэки
 stt_engine: Optional[STTEngine] = None
@@ -93,7 +95,8 @@ async def handle_user_speech(text: str, user_id: int) -> None:
             conversation.add_user_message(text, user_name)
 
             await generate_and_speak(
-                include_screen=screen_capture.last_frame is not None
+                include_screen=screen_capture.last_frame is not None,
+                include_minecraft=minecraft_bot.is_running
             )
             log.info("[PIPELINE] Speech processing complete")
     except Exception as e:
@@ -103,20 +106,26 @@ async def handle_user_speech(text: str, user_id: int) -> None:
 async def handle_screen_comment(frame_b64: str) -> None:
     """Генерирует комментарий к экрану."""
     async with _processing_lock:
-        messages = conversation.get_messages(include_screen=True)
+        # messages = conversation.get_messages(include_screen=True) # Logic moved to generate_and_speak
         await generate_and_speak(
             image_base64=frame_b64,
             include_screen=True,
+            include_minecraft=minecraft_bot.is_running
         )
 
 
 async def generate_and_speak(
     image_base64: Optional[str] = None,
     include_screen: bool = False,
+    include_minecraft: bool = False,
 ) -> None:
     """Генерирует ответ LLM стримом и озвучивает каждое предложение сразу."""
     try:
-        messages = conversation.get_messages(include_screen=include_screen)
+        mc_context = minecraft_bot.get_status_info() if include_minecraft else None
+        messages = conversation.get_messages(
+            include_screen=include_screen,
+            minecraft_context=mc_context
+        )
         log.info(f"[PIPELINE] generate_and_speak: {len(messages)} messages")
 
         screen_frame = image_base64 or (
@@ -127,14 +136,69 @@ async def generate_and_speak(
         log.info("[PIPELINE] Starting LLM stream...")
 
         async for sentence in llm_engine.generate_stream(messages, screen_frame):
+            # Проверяем на наличие команд Minecraft
+            if "[MC:" in sentence:
+                # Попытка выполнить команду и вырезать её из речи
+                import re
+                try:
+                    # Ищем все команды
+                    commands = re.findall(r"\[MC: (.*?)\]", sentence)
+                    for cmd in commands:
+                        log.info(f"[MC-Command] Executing: {cmd}")
+                        parts = cmd.split(" ", 1)
+                        action = parts[0].lower()
+                        args = parts[1] if len(parts) > 1 else ""
+                        
+                        if action == "chat":
+                            minecraft_bot.chat(args.strip('"'))
+                        elif action == "goto":
+                            try:
+                                coords = [float(c) for c in args.split()]
+                                if len(coords) == 3:
+                                    minecraft_bot.move_to(*coords)
+                            except ValueError:
+                                log.error(f"[MC-Command] Invalid coords: {args}")
+                        elif action == "follow":
+                            minecraft_bot.follow_player(args.strip('"'))
+                        elif action == "stop":
+                            minecraft_bot.stop_moving()
+                        elif action == "mine":
+                            # [MC: mine "oak_log" 5]
+                            parts_args = args.split('"')
+                            if len(parts_args) >= 3:
+                                blk = parts_args[1]
+                                count = 1
+                                try:
+                                    count = int(parts_args[2].strip())
+                                except: pass
+                                minecraft_bot.mine_block(blk, count)
+                        elif action == "attack":
+                            # [MC: attack "zombie"]
+                            minecraft_bot.attack_entity(args.strip('"'))
+                        elif action == "equip":
+                            # [MC: equip "sword"]
+                            minecraft_bot.equip_item(args.strip('"'))
+                        elif action == "inventory":
+                            # Force status update or say inventory
+                            inv = minecraft_bot.get_inventory()
+                            log.info(f"Inventory check: {inv}")
+                    
+                    # Удаляем команды из текста для TTS
+                    text_for_tts = re.sub(r"\[MC: .*?\]", "", sentence).strip()
+                    if not text_for_tts:
+                        continue # Если только команда, не озвучиваем
+                    
+                    sentence = text_for_tts
+                except Exception as mc_err:
+                    log.error(f"[MC-Command] Error: {mc_err}")
+
             full_response += " " + sentence
             log.info(f"[PIPELINE] LLM sentence: {sentence}")
 
             if not tts_engine._ready:
-                log.warning("[PIPELINE] TTS not ready yet, skipping")
-                continue
+                continue # Skip if TTS not ready
 
-            # Синтезируем и воспроизводим каждое предложение сразу
+            # Синтезируем и воспроизводим каждо предложение сразу
             audio_data = await tts_engine.synthesize(sentence)
             if audio_data:
                 log.info(f"[PIPELINE] Playing {len(audio_data)} bytes")
@@ -253,6 +317,30 @@ async def show_status(ctx: commands.Context):
         f"• История: {conversation.history_length} сообщений",
     ]
     await ctx.send("\n".join(status_lines))
+
+
+@bot.command(name="mc_join")
+async def mc_join(ctx: commands.Context, host: str = "localhost", port: int = 25565):
+    """Подключает бота к серверу Minecraft. (Пример: !mc_join localhost 25565)"""
+    try:
+        minecraft_bot.connect(host, port)
+        await ctx.send(f"Подключаюсь к Minecraft серверу {host}:{port}...")
+    except Exception as e:
+        await ctx.send(f"Ошибка подключения: {e}")
+
+
+@bot.command(name="mc_leave")
+async def mc_leave(ctx: commands.Context):
+    """Отключает бота от сервера Minecraft."""
+    minecraft_bot.disconnect()
+    await ctx.send("Бот отключен от Minecraft сервера.")
+
+
+@bot.command(name="mc_status")
+async def mc_status(ctx: commands.Context):
+    """Статус Minecraft бота."""
+    status = minecraft_bot.get_status_info()
+    await ctx.send(f"```\n{status}\n```")
 
 
 async def _on_recording_done(sink, channel):

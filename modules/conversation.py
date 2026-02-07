@@ -24,11 +24,12 @@ class Conversation:
         self._last_screen_comment_time: float = 0
         self._screen_comment_cooldown: float = 15.0  # секунд между комментариями экрана
 
-    def get_messages(self, include_screen: bool = False) -> list[dict]:
+    def get_messages(self, include_screen: bool = False, minecraft_context: Optional[str] = None) -> list[dict]:
         """Возвращает историю сообщений в формате OpenAI API.
         
         Args:
             include_screen: Добавить контекст о просмотре экрана
+            minecraft_context: Добавить контекст о состоянии Minecraft
             
         Returns:
             Список сообщений для OpenAI Chat API
@@ -39,6 +40,22 @@ class Conversation:
             messages[0]["content"] += (
                 "\nСейчас ты смотришь демонстрацию экрана друга и комментируешь игру. "
                 "Будь как зритель стрима — реагируй на интересные моменты."
+            )
+        
+        if minecraft_context:
+            messages[0]["content"] += (
+                f"\nТы сейчас находишься в игре Minecraft. Твое состояние:\n{minecraft_context}\n"
+                "Ты полноценный ИИ игрок. Ты можешь всё!\n"
+                "Команды управления:\n"
+                "[MC: chat \"Сообщение\"] - писать в чат\n"
+                "[MC: goto x y z] - идти в координаты\n"
+                "[MC: follow \"Player\"] - следовать\n"
+                "[MC: stop] - стоп\n"
+                "[MC: mine \"block_name\" count] - добыть блоки (например: [MC: mine \"oak_log\" 5])\n"
+                "[MC: attack \"entity_name\"] - атаковать моба (например: [MC: attack \"zombie\"])\n"
+                "[MC: equip \"item_name\"] - взять предмет в руку\n"
+                "[MC: inventory] - проверить инвентарь (хотя он есть в контексте)\n"
+                "Используй английские названия блоков и мобов (oak_log, zombie, iron_sword)."
             )
 
         messages.extend(list(self._history))
