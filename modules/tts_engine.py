@@ -130,6 +130,13 @@ class TTSEngine:
     def _synthesize_pcm(self, text: str) -> Optional[bytes]:
         """Синтезирует текст в PCM int16 bytes."""
         import tempfile, os, wave
+        
+        # Silero v4 падает на слишком коротком тексте (< 3 символа без пунктуации)
+        clean = text.strip().rstrip('.,!?;:…—')
+        if len(clean) < 2:
+            log.debug(f"TTS skip too short: '{text}'")
+            return None
+        
         try:
             tmp_path = os.path.join(tempfile.gettempdir(), f"silero_tts_{threading.get_ident()}.wav")
             
@@ -154,6 +161,9 @@ class TTSEngine:
                 pass
             
             return pcm_bytes
+        except ValueError:
+            log.warning(f"TTS can't synthesize: '{text}' (too short/invalid)")
+            return None
         except Exception as e:
             log.error(f"TTS synth error: {e}", exc_info=True)
             return None
