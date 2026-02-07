@@ -6,6 +6,8 @@
 
 import threading
 import time
+import struct
+from collections import defaultdict
 from typing import Callable, Optional
 
 from utils.logger import setup_logger
@@ -33,10 +35,13 @@ class STTEngine:
         self.on_speech_begin = on_speech_begin
         self._recorder = None
         self._ready = False
-        self._current_user_id: int = 0
         self._lock = threading.Lock()
         self._running = False
-        self._speech_start_time: float = 0.0  # когда началась речь
+        self._speech_start_time: float = 0.0
+        
+        # Отслеживание говорящего: накапливаем энергию аудио по каждому юзеру
+        self._user_energy: defaultdict[int, float] = defaultdict(float)
+        self._user_chunks: defaultdict[int, int] = defaultdict(int)
 
     def start(self) -> None:
         """Запускает инициализацию RealtimeSTT в фоновом потоке."""
@@ -55,12 +60,12 @@ class STTEngine:
                 language=self.language,
                 spinner=False,
                 use_microphone=False,
-                post_speech_silence_duration=0.8,
-                silero_sensitivity=0.5,
+                post_speech_silence_duration=0.4,
+                silero_sensitivity=0.4,
                 silero_use_onnx=True,
                 webrtc_sensitivity=3,
-                min_length_of_recording=0.5,
-                min_gap_between_recordings=0.2,
+                min_length_of_recording=0.3,
+                min_gap_between_recordings=0.1,
                 enable_realtime_transcription=False,
                 no_log_file=True,
                 level=50,
@@ -102,8 +107,12 @@ class STTEngine:
         if any(g in text.lower() for g in garbage):
             return
 
+        # Определяем говорящего по максимальной энергии аудио
         with self._lock:
-            user_id = self._current_user_id
+            if self._user_energy:
+                user_id = max(self._user_energy, key=self._user_energy.get)
+            else:
+                user_id = 0
 
         # Время распознавания
         stt_ms = (t_recognized - self._speech_start_time) * 1000 if self._speech_start_time > 0 else 0
@@ -115,6 +124,19 @@ class STTEngine:
             except Exception as e:
                 log.error(f"Error in on_text_ready callback: {e}")
 
+    @staticmethod
+    def _audio_energy(data: bytes) -> float:
+        """Вычисляет RMS энергию аудио чанка (int16 PCM)."""
+        if len(data) < 2:
+            return 0.0
+        n_samples = len(data) // 2
+        try:
+            samples = struct.unpack(f'<{n_samples}h', data[:n_samples * 2])
+            rms = (sum(s * s for s in samples) / n_samples) ** 0.5
+            return rms
+        except Exception:
+            return 0.0
+
     def feed_audio(self, audio_data: bytes, user_id: int) -> None:
         """Подаёт аудио-данные (16kHz mono int16 PCM) в STT.
         
@@ -125,8 +147,11 @@ class STTEngine:
         if not self._ready or not self._recorder:
             return
 
+        # Накапливаем энергию по каждому юзеру
+        energy = self._audio_energy(audio_data)
         with self._lock:
-            self._current_user_id = user_id
+            self._user_energy[user_id] += energy
+            self._user_chunks[user_id] += 1
 
         try:
             chunk_size = 4096
@@ -139,6 +164,10 @@ class STTEngine:
     def _on_recording_start_wrapper(self):
         """Колбэк: началась запись (обнаружена речь)."""
         self._speech_start_time = time.time()
+        # Сбрасываем счётчики энергии для нового сегмента речи
+        with self._lock:
+            self._user_energy.clear()
+            self._user_chunks.clear()
         if self.on_speech_begin:
             try:
                 self.on_speech_begin()
