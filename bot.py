@@ -226,15 +226,24 @@ async def generate_and_speak(
             log.info(f"{CYAN}[SEARCH] {search_query}{RESET}")
             search_results = await web_search.search(search_query)
             if search_results:
-                messages.append({
-                    "role": "system",
+                # Вставляем результаты ПЕРЕД последним сообщением пользователя,
+                # чтобы LLM воспринял их как свои знания, а не проигнорировал
+                search_msg = {
+                    "role": "user",
                     "content": (
-                        f"[Результаты поиска в интернете]:\n{search_results}\n\n"
-                        "ВАЖНО: Ответь на вопрос пользователя ИСПОЛЬЗУЯ эти результаты поиска. "
-                        "Перескажи найденную информацию своими словами, коротко и по делу."
+                        f"[СИСТЕМА: Ты загуглил и нашёл следующую информацию]:\n{search_results}\n\n"
+                        "Используй ЭТУ информацию чтобы ответить на следующий вопрос. "
+                        "НЕ говори что не знаешь или не играешь. Перескажи найденное коротко."
                     ),
-                })
-                log.info(f"{GREEN}[SEARCH] Results injected{RESET}")
+                }
+                # Находим позицию последнего user сообщения и вставляем перед ним
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i]["role"] == "user":
+                        messages.insert(i, search_msg)
+                        break
+                else:
+                    messages.append(search_msg)
+                log.info(f"{GREEN}[SEARCH] Results injected before last user msg{RESET}")
             else:
                 log.info(f"{YELLOW}[SEARCH] No results{RESET}")
 
