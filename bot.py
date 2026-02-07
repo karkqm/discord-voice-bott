@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 import threading
 import time
@@ -19,6 +20,7 @@ from modules.voice_player import VoicePlayer
 from modules.screen_capture import ScreenCapture
 from modules.conversation import Conversation
 from modules import web_search
+from modules.music_player import MusicPlayer, is_music_request
 from utils.logger import suppress_noisy_loggers
 suppress_noisy_loggers()
 
@@ -61,6 +63,7 @@ screen_capture = ScreenCapture(
     interval=config.SCREEN_CAPTURE_INTERVAL,
 )
 minecraft_bot = MinecraftBot(bot_name=config.BOT_NAME) if MINECRAFT_AVAILABLE else None
+music_player = MusicPlayer()
 
 # STT создаётся позже, т.к. нужны колбэки
 stt_engine: Optional[STTEngine] = None
@@ -69,6 +72,12 @@ stt_engine: Optional[STTEngine] = None
 _generation_task: Optional[asyncio.Task] = None
 _pending: bool = False
 _shutup: bool = False
+
+# ID голосового канала для автоматического подключения
+AUTO_JOIN_CHANNEL_ID: int = int(os.getenv("AUTO_JOIN_CHANNEL_ID", "0"))
+
+# Текстовый канал для отправки ссылок (устанавливается при подключении)
+_text_channel: Optional[discord.TextChannel] = None
 
 # Команды "заткнись" — только прямые команды боту
 _SHUTUP_PATTERNS = [
@@ -132,6 +141,7 @@ async def handle_user_speech(text: str, user_id: int) -> None:
             _shutup = True
             tts_engine.stop()
             voice_player.stop()
+            music_player.stop()
             return
 
         # Проверяем, обращаются ли к боту
@@ -151,6 +161,17 @@ async def handle_user_speech(text: str, user_id: int) -> None:
 
         log.info(f"{BOLD}{user_name}{RESET}: {text}")
 
+        # === Музыка: перехватываем до LLM ===
+        music_req = is_music_request(text)
+        if music_req:
+            await _handle_music_request(music_req, text)
+            return
+
+        # === Ссылки: "скинь ссылку на ..." ===
+        if _is_link_request(text):
+            asyncio.create_task(_handle_link_request(text))
+            # Не return — пусть LLM тоже ответит голосом
+
         # Если бот сейчас генерирует — просто ставим флаг, ответит когда закончит
         if _generation_task and not _generation_task.done():
             _pending = True
@@ -164,6 +185,154 @@ async def handle_user_speech(text: str, user_id: int) -> None:
             
     except Exception as e:
         log.error(f"[PIPELINE] handle_user_speech error: {e}", exc_info=True)
+
+
+async def _handle_music_request(music_req: str, original_text: str) -> None:
+    """Обрабатывает запрос на музыку."""
+    if music_req == "__STOP__":
+        music_player.stop()
+        log.info(f"{CYAN}[MUSIC] Stopped{RESET}")
+        tts_engine.feed("Окей, выключаю музыку.")
+        voice_player.mark_done()
+        return
+    
+    if music_req == "__SKIP__":
+        music_player.stop()
+        log.info(f"{CYAN}[MUSIC] Skipped{RESET}")
+        tts_engine.feed("Пропускаю.")
+        voice_player.mark_done()
+        return
+    
+    # Останавливаем TTS чтобы не мешал
+    tts_engine.stop()
+    voice_player.stop()
+    
+    log.info(f"{CYAN}[MUSIC] Request: {music_req}{RESET}")
+    tts_engine.feed(f"Ищу {music_req}...")
+    voice_player.mark_done()
+    
+    # Ждём пока TTS доиграет
+    await asyncio.sleep(2.0)
+    
+    # Передаём voice client музыкальному плееру
+    music_player.set_voice_client(voice_player.voice_client)
+    
+    track = await music_player.play(music_req)
+    if track:
+        title = track.get("title", "Unknown")
+        log.info(f"{GREEN}[MUSIC] Now playing: {title}{RESET}")
+        # Отправляем ссылку в текстовый чат
+        if _text_channel and track.get("url"):
+            try:
+                await _text_channel.send(f"🎵 **Сейчас играет:** {title}\n{track['url']}")
+            except Exception:
+                pass
+    else:
+        log.info(f"{YELLOW}[MUSIC] Nothing found for: {music_req}{RESET}")
+        tts_engine.feed(f"Не нашёл {music_req}, извини.")
+        voice_player.mark_done()
+
+
+def _is_link_request(text: str) -> bool:
+    """Проверяет, просят ли скинуть ссылку."""
+    text_lower = text.lower()
+    return any(p in text_lower for p in [
+        "скинь ссылку", "кинь ссылку", "дай ссылку", "отправь ссылку",
+        "скинь линк", "кинь линк", "дай линк",
+        "скинь в чат", "кинь в чат",
+    ])
+
+
+async def _handle_link_request(text: str) -> None:
+    """Ищет ссылку и отправляет в текстовый чат."""
+    if not _text_channel:
+        log.warning("[LINK] No text channel set")
+        return
+    
+    # Используем web_search для поиска
+    query = text.lower()
+    for word in ["скинь", "кинь", "дай", "отправь", "ссылку", "линк", "в чат", "на", "андрей", "алекс", "бот"]:
+        query = query.replace(word, "")
+    query = re.sub(r'\s+', ' ', query).strip()
+    
+    if len(query) < 3:
+        return
+    
+    log.info(f"{CYAN}[LINK] Searching for: {query}{RESET}")
+    
+    results = await web_search.search(query)
+    if results:
+        # Извлекаем первую ссылку из результатов
+        # Результаты в формате "1. Title: Body"
+        # Нам нужно найти URL — делаем отдельный поиск
+        pass
+    
+    # Прямой поиск через web_search для получения URL
+    from modules.web_search import _rewrite_query_llm, _brave_search, _ddg_search, BRAVE_API_KEY, DDG_AVAILABLE
+    
+    rewritten = await _rewrite_query_llm(query)
+    search_query = rewritten or query
+    
+    results_raw = None
+    if BRAVE_API_KEY:
+        results_raw = await _brave_search(search_query, 3)
+    if not results_raw and DDG_AVAILABLE:
+        results_raw = await _ddg_search(search_query, 3)
+    
+    if results_raw:
+        lines = []
+        for r in results_raw[:3]:
+            title = r.get("title", "")
+            href = r.get("href", "")
+            if href:
+                lines.append(f"**{title}**\n{href}")
+        
+        if lines:
+            msg = f"🔗 Вот что нашёл по запросу **{query}**:\n\n" + "\n\n".join(lines)
+            try:
+                await _text_channel.send(msg)
+                log.info(f"{GREEN}[LINK] Sent {len(lines)} links to chat{RESET}")
+            except Exception as e:
+                log.error(f"[LINK] Failed to send: {e}")
+    else:
+        try:
+            await _text_channel.send(f"Не нашёл ссылок по запросу: {query}")
+        except Exception:
+            pass
+
+
+async def _auto_join_voice() -> None:
+    """Автоматически подключается к голосовому каналу."""
+    global _text_channel
+    
+    channel_id = AUTO_JOIN_CHANNEL_ID
+    if not channel_id:
+        return
+    
+    channel = bot.get_channel(channel_id)
+    if not channel or not isinstance(channel, discord.VoiceChannel):
+        log.warning(f"[AUTO-JOIN] Channel {channel_id} not found or not a voice channel")
+        return
+    
+    log.info(f"[AUTO-JOIN] Connecting to: {channel.name}")
+    await voice_player.connect(channel)
+    
+    # Начинаем слушать голос
+    vc = voice_player.voice_client
+    if vc:
+        sink = RealtimeSink(on_audio_chunk=on_voice_audio_chunk, bot_user_id=bot.user.id)
+        vc.start_recording(sink, _on_recording_done, None)
+        log.info("Started realtime audio recording")
+    
+    # Находим текстовый канал в том же сервере
+    if channel.guild:
+        for tc in channel.guild.text_channels:
+            if tc.permissions_for(channel.guild.me).send_messages:
+                _text_channel = tc
+                log.info(f"[AUTO-JOIN] Text channel: {tc.name}")
+                break
+    
+    log.info(f"Joined voice channel: {channel.name}")
 
 
 async def _generation_worker() -> None:
@@ -207,6 +376,11 @@ async def generate_and_speak(
     try:
         pipeline_start = time.time()
         log.debug(f"[GEN] Pipeline start")
+        
+        # Останавливаем музыку если играет — бот хочет говорить
+        if music_player.is_playing:
+            music_player.stop()
+            log.info(f"{CYAN}[MUSIC] Stopped for TTS{RESET}")
         
         mc_context = minecraft_bot.get_status_info() if (include_minecraft and minecraft_bot) else None
         messages = conversation.get_messages(
@@ -396,6 +570,11 @@ async def on_ready():
 
     log.info("Bot ready! TTS and STT loading in background...")
 
+    # Автоматическое подключение к голосовому каналу
+    if AUTO_JOIN_CHANNEL_ID:
+        await asyncio.sleep(2)  # Даём время на загрузку TTS/STT
+        await _auto_join_voice()
+
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -426,6 +605,10 @@ async def join_voice(ctx: commands.Context):
         sink = RealtimeSink(on_audio_chunk=on_voice_audio_chunk, bot_user_id=bot.user.id)
         vc.start_recording(sink, _on_recording_done, ctx.channel)
         log.info("Started realtime audio recording")
+
+    # Запоминаем текстовый канал для отправки ссылок
+    global _text_channel
+    _text_channel = ctx.channel
 
     await ctx.send(f"Подключился к **{channel.name}**! 🎤")
     log.info(f"Joined voice channel: {channel.name}")
