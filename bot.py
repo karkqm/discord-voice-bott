@@ -48,7 +48,7 @@ voice_player = VoicePlayer()
 screen_capture = ScreenCapture(
     interval=config.SCREEN_CAPTURE_INTERVAL,
 )
-minecraft_bot = MinecraftBot(bot_name=config.BOT_NAME)
+minecraft_bot = MinecraftBot(bot_name=config.BOT_NAME) if MINECRAFT_AVAILABLE else None
 
 # STT создаётся позже, т.к. нужны колбэки
 stt_engine: Optional[STTEngine] = None
@@ -135,7 +135,7 @@ async def handle_user_speech(text: str, user_id: int) -> None:
             generation_task = asyncio.create_task(
                 generate_and_speak(
                     include_screen=screen_capture.last_frame is not None,
-                    include_minecraft=minecraft_bot.is_running
+                    include_minecraft=minecraft_bot.is_running if minecraft_bot else False
                 )
             )
             try:
@@ -156,7 +156,7 @@ async def handle_screen_comment(frame_b64: str) -> None:
         await generate_and_speak(
             image_base64=frame_b64,
             include_screen=True,
-            include_minecraft=minecraft_bot.is_running
+            include_minecraft=minecraft_bot.is_running if minecraft_bot else False
         )
 
 
@@ -167,7 +167,7 @@ async def generate_and_speak(
 ) -> None:
     """Генерирует ответ LLM стримом и озвучивает каждое предложение сразу."""
     try:
-        mc_context = minecraft_bot.get_status_info() if include_minecraft else None
+        mc_context = minecraft_bot.get_status_info() if (include_minecraft and minecraft_bot) else None
         messages = conversation.get_messages(
             include_screen=include_screen,
             minecraft_context=mc_context
@@ -183,7 +183,7 @@ async def generate_and_speak(
 
         async for sentence in llm_engine.generate_stream(messages, screen_frame):
             # Проверяем на наличие команд Minecraft
-            if "[MC:" in sentence:
+            if "[MC:" in sentence and minecraft_bot:
                 # Попытка выполнить команду и вырезать её из речи
                 import re
                 try:
@@ -367,6 +367,9 @@ async def show_status(ctx: commands.Context):
 @bot.command(name="mc_join")
 async def mc_join(ctx: commands.Context, host: str = "localhost", port: int = 25565):
     """Подключает бота к серверу Minecraft. (Пример: !mc_join localhost 25565)"""
+    if not minecraft_bot:
+        await ctx.send("Minecraft бот недоступен (javascript модуль не установлен).")
+        return
     try:
         minecraft_bot.connect(host, port)
         await ctx.send(f"Подключаюсь к Minecraft серверу {host}:{port}...")
@@ -377,6 +380,9 @@ async def mc_join(ctx: commands.Context, host: str = "localhost", port: int = 25
 @bot.command(name="mc_leave")
 async def mc_leave(ctx: commands.Context):
     """Отключает бота от сервера Minecraft."""
+    if not minecraft_bot:
+        await ctx.send("Minecraft бот недоступен.")
+        return
     minecraft_bot.disconnect()
     await ctx.send("Бот отключен от Minecraft сервера.")
 
@@ -384,6 +390,9 @@ async def mc_leave(ctx: commands.Context):
 @bot.command(name="mc_status")
 async def mc_status(ctx: commands.Context):
     """Статус Minecraft бота."""
+    if not minecraft_bot:
+        await ctx.send("Minecraft бот недоступен.")
+        return
     status = minecraft_bot.get_status_info()
     await ctx.send(f"```\n{status}\n```")
 
