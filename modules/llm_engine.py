@@ -78,7 +78,7 @@ class LLMEngine:
             "Authorization": f"Bearer {self._api_key}",
         }
         
-        CONNECT_TIMEOUT = 5   # макс время на connect + первый ответ сервера
+        CONNECT_TIMEOUT = 7   # макс время на connect + первый ответ сервера
         STREAM_TIMEOUT = 30   # макс время между SSE чанками при стриминге
 
         t0 = time.time()
@@ -106,7 +106,7 @@ class LLMEngine:
             t_connect = time.time() - t0
             log.debug(f"[LLM] Connected ({t_connect:.1f}s, status={resp.status})")
 
-            if resp.status != 200:
+            if resp.status not in (200, 201):
                 body = await resp.text()
                 log.warning(f"LLM API error {resp.status}: {body[:200]}")
                 return
