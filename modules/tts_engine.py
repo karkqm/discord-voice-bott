@@ -70,72 +70,113 @@ class TTSEngine:
                 self._device = "cpu"
                 if torch.cuda.is_available():
                     log.warning("CUDA detected but not compatible with this PyTorch. Using CPU.")
-                    log.warning("For RTX 50xx: pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128")
             
             log.info(f"Loading Silero TTS v4 on {self._device}...")
             
-            # Подавляем loguru спам от silero_tts
+            # Подавляем loguru спам
             try:
                 from loguru import logger as loguru_logger
                 loguru_logger.disable("silero_tts")
+                loguru_logger.disable("")
             except ImportError:
                 pass
             
-            # Используем silero_tts для скачивания модели, затем извлекаем torch модель
-            from silero_tts.silero_tts import SileroTTS
+            # Способ 1: torch.hub.load (прямой доступ к модели, быстрый синтез)
+            self._use_direct = False
+            try:
+                model, example = torch.hub.load(
+                    repo_or_dir='snakers4/silero-models',
+                    model='silero_tts',
+                    language='ru',
+                    speaker='v4_ru',
+                    trust_repo=True,
+                )
+                if model is not None and hasattr(model, 'apply_tts'):
+                    self._model = model.to(self._device)
+                    self._use_direct = True
+                    log.info(f"Loaded via torch.hub (direct mode)")
+                else:
+                    log.warning(f"torch.hub returned invalid model: {type(model)}")
+                    raise RuntimeError("Invalid model")
+            except Exception as hub_err:
+                log.warning(f"torch.hub.load failed: {hub_err}, trying silero_tts package...")
+                
+                # Способ 2: silero_tts пакет (файловый I/O, но совместим с nightly)
+                from silero_tts.silero_tts import SileroTTS
+                self._silero_pkg = SileroTTS(
+                    model_id='v4_ru',
+                    language='ru',
+                    speaker=self.voice,
+                    sample_rate=SILERO_SAMPLE_RATE,
+                    device=self._device,
+                )
+                self._model = self._silero_pkg  # используем пакетный .tts() метод
+                self._use_direct = False
+                log.info(f"Loaded via silero_tts package (file I/O mode)")
             
-            silero = SileroTTS(
-                model_id='v4_ru',
-                language='ru',
-                speaker=self.voice,
-                sample_rate=SILERO_SAMPLE_RATE,
-                device=self._device,
-            )
-            
-            # Извлекаем низкоуровневую torch модель для прямого вызова (без файлового I/O)
-            self._model = silero.model
-            if self._model is None:
-                raise RuntimeError("Failed to extract torch model from SileroTTS")
-            
-            log.info(f"Silero TTS model extracted: type={type(self._model).__name__}, device={self._device}")
-            
-            # Прогрев модели (3 раза для стабильности CUDA)
-            log.info("Warming up TTS model...")
+            # Прогрев модели
+            log.info("Warming up TTS...")
             for _ in range(3):
-                self._synth_direct("Привет.")
+                self._synthesize_pcm("Привет.")
             
             self._ready = True
-            log.info(f"TTS engine ready (Silero v4, voice={self.voice}, device={self._device})")
+            mode = "direct" if self._use_direct else "file I/O"
+            log.info(f"TTS ready (Silero v4, {self.voice}, {self._device}, {mode})")
             
-            # Один worker поток для синтеза (модель на GPU не параллелится)
+            # Один worker поток
             self._worker_thread = threading.Thread(target=self._synthesis_worker, daemon=True)
             self._worker_thread.start()
             
         except Exception as e:
             log.error(f"Failed to start TTS engine: {e}", exc_info=True)
 
-    def _synth_direct(self, text: str) -> Optional[bytes]:
-        """Прямой синтез через torch модель (без файлового I/O)."""
+    def _synthesize_pcm(self, text: str) -> Optional[bytes]:
+        """Синтезирует текст в PCM int16 bytes."""
         if not self._model:
             return None
+        
+        if self._use_direct:
+            return self._synth_direct(text)
+        else:
+            return self._synth_via_file(text)
+
+    def _synth_direct(self, text: str) -> Optional[bytes]:
+        """Прямой синтез через torch модель (без файлового I/O)."""
         try:
-            # Silero v4 model: save_wav / apply_tts возвращает tensor
             audio = self._model.apply_tts(
                 text=text,
                 speaker=self.voice,
                 sample_rate=SILERO_SAMPLE_RATE,
             )
-            # audio — torch.Tensor float32 [-1, 1]
             if isinstance(audio, torch.Tensor):
                 audio_np = audio.cpu().numpy()
             else:
                 audio_np = np.array(audio, dtype=np.float32)
             
-            # float32 -> int16 PCM
             pcm_int16 = (audio_np * 32767).astype(np.int16)
             return pcm_int16.tobytes()
         except Exception as e:
-            log.error(f"Direct TTS synth error: {e}", exc_info=True)
+            log.error(f"Direct TTS error: {e}", exc_info=True)
+            return None
+
+    def _synth_via_file(self, text: str) -> Optional[bytes]:
+        """Синтез через silero_tts пакет (WAV файл)."""
+        try:
+            import tempfile, os, wave
+            tmp_path = os.path.join(tempfile.gettempdir(), f"silero_tts_{threading.get_ident()}.wav")
+            self._silero_pkg.tts(text, tmp_path)
+            
+            with wave.open(tmp_path, 'rb') as wf:
+                pcm_bytes = wf.readframes(wf.getnframes())
+            
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+            
+            return pcm_bytes
+        except Exception as e:
+            log.error(f"File TTS error: {e}", exc_info=True)
             return None
 
     def _synthesis_worker(self) -> None:
@@ -153,7 +194,7 @@ class TTSEngine:
                 self._is_speaking = True
                 t0 = time.time()
                 
-                pcm_bytes = self._synth_direct(text)
+                pcm_bytes = self._synthesize_pcm(text)
                 
                 elapsed = (time.time() - t0) * 1000
                 
