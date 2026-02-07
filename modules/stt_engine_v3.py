@@ -125,7 +125,7 @@ class STTEngine:
             self._whisper_model.transcribe(dummy, language=self.language, beam_size=1, best_of=1, vad_filter=False)
             log.info("Whisper warmed up — STT fully ready")
             
-            self._transcribe_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stt")
+            self._transcribe_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="stt")
             self._ready = True
             
         except Exception as e:
@@ -246,14 +246,18 @@ class STTEngine:
             # int16 PCM -> float32 numpy array
             audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
             
+            # Пропускаем слишком старые сегменты (очередь забилась)
+            if t0 - speech_start > 5.0:
+                log.warning(f"Dropping stale audio from user {user_id} ({t0 - speech_start:.1f}s old)")
+                return
+            
             # faster-whisper транскрипция
             segments, info = self._whisper_model.transcribe(
                 audio_np,
                 language=self.language,
                 beam_size=1,
                 best_of=1,
-                vad_filter=False,  # мы уже отфильтровали VAD
-                initial_prompt="Разговор на русском языке в Discord голосовом чате.",
+                vad_filter=False,
             )
             
             text = " ".join(seg.text.strip() for seg in segments).strip()
@@ -263,7 +267,7 @@ class STTEngine:
             if not text or len(text) < 3:
                 return
             
-            # Фильтр мусора
+            # Фильтр мусора и галлюцинаций Whisper
             garbage = {
                 "субтитры сделал dimatorzok", "dimatorzok",
                 "продолжение следует", "спасибо за просмотр",
@@ -271,6 +275,7 @@ class STTEngine:
                 "редактор субтитров", "amara.org",
                 "[silence]", "silence", "thanks for watching",
                 "thank you for watching", "you", "the",
+                "разговор на русском языке", "discord голосовом чате",
             }
             if any(g in text.lower() for g in garbage):
                 return
