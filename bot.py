@@ -18,6 +18,7 @@ from modules.tts_engine import TTSEngine
 from modules.voice_player import VoicePlayer
 from modules.screen_capture import ScreenCapture
 from modules.conversation import Conversation
+from modules import web_search
 from utils.logger import suppress_noisy_loggers
 suppress_noisy_loggers()
 
@@ -212,6 +213,24 @@ async def generate_and_speak(
             include_screen=include_screen,
             minecraft_context=mc_context
         )
+
+        # Веб-поиск: проверяем последнее сообщение пользователя
+        last_user_text = ""
+        for msg in reversed(messages):
+            if msg["role"] == "user":
+                last_user_text = msg["content"]
+                break
+        
+        search_query = web_search.needs_search(last_user_text)
+        if search_query:
+            log.debug(f"[GEN] Web search: {search_query}")
+            search_results = await web_search.search(search_query)
+            if search_results:
+                messages.append({
+                    "role": "system",
+                    "content": f"[Результаты поиска в интернете по запросу \"{search_query}\"]:\n{search_results}\n\nИспользуй эту информацию для ответа. Отвечай коротко и по делу.",
+                })
+                log.debug(f"[GEN] Search results injected")
 
         screen_frame = image_base64 or (
             screen_capture.last_frame if include_screen else None
