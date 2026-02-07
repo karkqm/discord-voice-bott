@@ -22,6 +22,7 @@ class PCMStreamAudioSource(discord.AudioSource):
         # 20ms = 192000 * 0.02 = 3840 bytes
         self._buffer = queue.Queue()
         self._buffering = True  # Сначала накапливаем немного
+        self._min_buffer_size = 10 # ~200мс (10 * 20мс) для старта
         self._max_buffer_size = 50 # ~1 секунда
         self._finished = False
         
@@ -40,10 +41,20 @@ class PCMStreamAudioSource(discord.AudioSource):
             self._buffer.put(chunk)
 
     def read(self) -> bytes:
+        # Если буферизация активна, ждем накопления
+        if self._buffering:
+            if self._buffer.qsize() >= self._min_buffer_size or self._finished:
+                self._buffering = False
+                # log.debug("Buffering complete, starting playback")
+            else:
+                return self._silence
+
         if self._buffer.empty():
             if self._finished:
                 return b''
-            # Если буфер пуст, но не finished — шлем тишину, чтобы не рвать соединение
+            # Буфер опустел — кратковременная пауза для накопления (анти-джиттер)
+            self._buffering = True
+            # log.warning("Buffer underrun, buffering...")
             return self._silence
 
         return self._buffer.get()

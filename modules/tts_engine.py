@@ -1,4 +1,5 @@
 import threading
+import io
 from typing import Optional, Callable
 
 from utils.logger import setup_logger
@@ -20,6 +21,11 @@ class TTSEngine:
         self._stream = None
         self._ready = False
         self._is_speaking = False
+        
+        # Буфер для накопления MP3 перед декодированием (оптимизация pydub overhead)
+        self._mp3_buffer = io.BytesIO()
+        self._mp3_buffer_size = 0
+        self._min_decode_size = 4096  # ~0.25 сек аудио 128kbps
 
     def start(self) -> None:
         """Запускает инициализацию RealtimeTTS в фоновом потоке."""
@@ -49,8 +55,12 @@ class TTSEngine:
 
     def _on_stream_start(self):
         self._is_speaking = True
+        self._mp3_buffer = io.BytesIO()
+        self._mp3_buffer_size = 0
 
     def _on_stream_stop(self):
+        # Декодируем остаток буфера
+        self._flush_mp3_buffer()
         self._is_speaking = False
 
     def feed(self, text: str) -> None:
@@ -75,24 +85,46 @@ class TTSEngine:
         log.debug(f"TTS feed: {text[:30]}...")
 
     def _on_chunk_wrapper(self, chunk: bytes):
-        """Обертка для колбэка — декодируем MP3 от EdgeTTS в PCM."""
+        """Обертка для колбэка — накапливаем и декодируем MP3."""
         if not self.on_audio_chunk:
             return
             
-        try:
-            # EdgeTTS через RealtimeTTS дает MP3 байты, не PCM!
-            # Декодируем MP3 -> PCM с помощью pydub
-            from pydub import AudioSegment
-            import io
+        self._mp3_buffer.write(chunk)
+        self._mp3_buffer_size += len(chunk)
+        
+        # Если накопили достаточно — декодируем
+        if self._mp3_buffer_size >= self._min_decode_size:
+            self._flush_mp3_buffer()
+
+    def _flush_mp3_buffer(self):
+        """Декодирует накопленный MP3 буфер и отправляет в PCM."""
+        if self._mp3_buffer_size == 0:
+            return
             
-            audio = AudioSegment.from_mp3(io.BytesIO(chunk))
+        try:
+            from pydub import AudioSegment
+            
+            self._mp3_buffer.seek(0)
+            # Декодируем MP3 -> PCM
+            try:
+                audio = AudioSegment.from_mp3(self._mp3_buffer)
+            except Exception:
+                # Если чанк битый или неполный, pydub может упасть.
+                # В стриминге это возможно. Просто игнорируем ошибку декодирования конкретного куска.
+                return
+
             # Конвертируем в нужный формат: 24kHz mono 16-bit
             audio = audio.set_frame_rate(24000).set_channels(1).set_sample_width(2)
             pcm_data = audio.raw_data
             
             self.on_audio_chunk(pcm_data, 24000)
+            
+            # Сбрасываем буфер
+            self._mp3_buffer = io.BytesIO()
+            self._mp3_buffer_size = 0
+            
         except Exception as e:
-            log.error(f"MP3 decode error: {e}")
+            log.error(f"MP3 flush error: {e}")
 
     def stop(self) -> None:
         """Останавливает чтение и очищает очередь."""
