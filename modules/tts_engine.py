@@ -82,14 +82,23 @@ class TTSEngine:
                 trust_repo=True,
             )
             
-            # torch.hub.load returns (model, symbols, sample_rate, example, apply_tts) or just model
-            if isinstance(result, tuple):
-                self._model = result[0]
+            # Debug: log what torch.hub.load returned
+            log.info(f"Silero hub.load returned type={type(result)}")
+            if isinstance(result, (list, tuple)):
+                log.info(f"  Length={len(result)}, types={[type(x).__name__ for x in result]}")
+                # Find the model object (has apply_tts method)
+                self._model = None
+                for item in result:
+                    if hasattr(item, 'apply_tts'):
+                        self._model = item
+                        break
+                if self._model is None and len(result) > 0:
+                    self._model = result[0]
             else:
                 self._model = result
             
-            if self._model is None:
-                raise RuntimeError("Silero model loaded as None")
+            if self._model is None or not hasattr(self._model, 'apply_tts'):
+                raise RuntimeError(f"Silero model invalid: type={type(self._model)}, has apply_tts={hasattr(self._model, 'apply_tts') if self._model else 'None'}")
             
             self._model = self._model.to(self._device)
             
