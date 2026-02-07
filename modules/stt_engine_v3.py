@@ -247,7 +247,7 @@ class STTEngine:
             audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
             
             # Пропускаем слишком старые сегменты (очередь забилась)
-            if t0 - speech_start > 5.0:
+            if t0 - speech_start > 15.0:
                 log.warning(f"Dropping stale audio from user {user_id} ({t0 - speech_start:.1f}s old)")
                 return
             

@@ -63,12 +63,17 @@ minecraft_bot = MinecraftBot(bot_name=config.BOT_NAME) if MINECRAFT_AVAILABLE el
 # STT создаётся позже, т.к. нужны колбэки
 stt_engine: Optional[STTEngine] = None
 
-# Активные задачи генерации (одна на юзера, новая отменяет предыдущую)
-_user_tasks: dict[int, asyncio.Task] = {}  # user_id -> current generation task
+# Генерация: одна активная задача, новые сообщения копятся в очередь
+_generation_task: Optional[asyncio.Task] = None
+_pending_response: bool = False  # есть новые addressed сообщения для ответа
 
-# Защита от перебивания: дать боту договорить перед новым ответом
-_last_response_start: float = 0.0
-_response_cooldown_sec: float = 3.0  # секунды после начала ответа бота
+# Команды "заткнись"
+_SHUTUP_PHRASES = {
+    "заткнись", "заткнитесь", "помолчи", "замолчи",
+    "замолкни", "тихо", "стоп", "хватит",
+    "закрой рот", "завали", "завались",
+    "shut up", "stfu", "молчи", "не говори",
+}
 
 
 # --- Callbacks ---
@@ -79,6 +84,15 @@ def on_stt_text_ready(text: str, user_id: int) -> None:
         handle_user_speech(text, user_id),
         bot.loop,
     )
+
+
+def _is_shutup_command(text: str) -> bool:
+    """Проверяет, просят ли бота замолчать."""
+    text_lower = text.lower().strip()
+    for phrase in _SHUTUP_PHRASES:
+        if phrase in text_lower:
+            return True
+    return False
 
 
 def on_voice_audio_chunk(audio_data: bytes, user_id: int) -> None:
@@ -98,14 +112,26 @@ def on_screen_frame_ready(frame_b64: str) -> None:
 
 async def handle_user_speech(text: str, user_id: int) -> None:
     """Обрабатывает распознанную речь пользователя."""
+    global _generation_task, _pending_response
+    
     try:
-        t_start = time.time()
         user_name = f"User_{user_id}"
         for guild in bot.guilds:
             member = guild.get_member(user_id)
             if member:
                 user_name = member.display_name
                 break
+
+        # Проверяем команду "заткнись" — немедленно останавливаем всё
+        if _is_shutup_command(text):
+            log.info(f"{RED}🤐 {user_name}: {text} — замолкаю!{RESET}")
+            conversation.add_user_message(text, user_name)
+            if _generation_task and not _generation_task.done():
+                _generation_task.cancel()
+            tts_engine.stop()
+            voice_player.stop()
+            _pending_response = False
+            return
 
         # Проверяем, обращаются ли к боту
         is_addressed = conversation.is_addressed_to_bot(text)
@@ -119,39 +145,40 @@ async def handle_user_speech(text: str, user_id: int) -> None:
 
         log.info(f"{BOLD}{user_name}{RESET}: {text}")
 
-        global _last_response_start
-        
-        # Cooldown: если бот только начал отвечать, не перебиваем
-        time_since_response = time.time() - _last_response_start
-        if _last_response_start > 0 and time_since_response < _response_cooldown_sec:
-            # Бот ещё говорит — пропускаем, но текст уже в истории
-            log.info(f"{YELLOW}[SKIP] Bot is speaking ({time_since_response:.1f}s ago), queued in history{RESET}")
+        # Если бот сейчас говорит/генерирует — не перебиваем, а ставим в очередь
+        if _generation_task and not _generation_task.done():
+            _pending_response = True
+            log.info(f"{YELLOW}[ОЧЕРЕДЬ] Бот говорит, отвечу после{RESET}")
             return
         
-        # Отменяем предыдущие генерации
-        for uid, prev_task in list(_user_tasks.items()):
-            if prev_task and not prev_task.done():
-                prev_task.cancel()
-        
-        tts_engine.stop()
-        voice_player.stop()
-        
-        _last_response_start = time.time()
-        
-        task = asyncio.create_task(
-            generate_and_speak(
-                include_screen=screen_capture.last_frame is not None,
-                include_minecraft=minecraft_bot.is_running if minecraft_bot else False
-            )
+        # Бот свободен — отвечаем сразу
+        _pending_response = False
+        _generation_task = asyncio.create_task(
+            _generate_response_loop()
         )
-        _user_tasks[user_id] = task
-        try:
-            await task
-        except asyncio.CancelledError:
-             log.info("Generation cancelled (new message)")
             
     except Exception as e:
         log.error(f"[PIPELINE] handle_user_speech error: {e}", exc_info=True)
+
+
+async def _generate_response_loop() -> None:
+    """Генерирует ответ и проверяет очередь после завершения."""
+    global _pending_response
+    
+    while True:
+        _pending_response = False
+        await generate_and_speak(
+            include_screen=screen_capture.last_frame is not None,
+            include_minecraft=minecraft_bot.is_running if minecraft_bot else False
+        )
+        
+        # После ответа проверяем: накопились ли новые сообщения?
+        if _pending_response:
+            log.info(f"{CYAN}[ОЧЕРЕДЬ] Отвечаю на накопившиеся сообщения...{RESET}")
+            await asyncio.sleep(0.3)  # короткая пауза между ответами
+            continue
+        else:
+            break
 
 
 async def handle_screen_comment(frame_b64: str) -> None:
@@ -255,9 +282,6 @@ async def generate_and_speak(
 
         if full_response.strip():
             conversation.add_bot_message(full_response.strip())
-        
-        global _last_response_start
-        _last_response_start = 0.0  # Сбрасываем cooldown — бот закончил
         
         total_time = time.time() - pipeline_start
         llm_ms = (t_first_sentence - t_llm_start) * 1000 if t_first_sentence else 0
