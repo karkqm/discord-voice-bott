@@ -64,11 +64,18 @@ stt_engine: Optional[STTEngine] = None
 # Флаг обработки (чтобы не обрабатывать параллельно)
 _processing_lock = asyncio.Lock()
 
+# Barge-in cooldown: не прерывать бота сразу после распознавания речи
+_last_stt_finish_time: float = 0.0
+_barge_in_cooldown_sec: float = 1.5  # секунды после распознавания
+
 
 # --- Callbacks ---
 
 def on_stt_text_ready(text: str, user_id: int) -> None:
     """Колбэк: STT распознал финальный текст от пользователя."""
+    global _last_stt_finish_time
+    _last_stt_finish_time = time.time()  # Записываем время окончания речи
+    
     log.info(f"Speech recognized from {user_id}: {text}")
     # Запускаем обработку в event loop бота
     asyncio.run_coroutine_threadsafe(
@@ -79,6 +86,15 @@ def on_stt_text_ready(text: str, user_id: int) -> None:
 
 def on_user_speech_begin() -> None:
     """Колбэк: пользователь начал говорить (Barge-in)."""
+    # Проверяем cooldown — не прерывать сразу после распознавания речи
+    elapsed = time.time() - _last_stt_finish_time
+    if elapsed < _barge_in_cooldown_sec:
+        return  # Игнорируем — слишком рано после распознавания
+    
+    # Проверяем, что бот вообще что-то говорит
+    if not voice_player.is_playing:
+        return  # Нечего прерывать
+    
     log.info("[BARGE-IN] User started speaking, stopping bot...")
     
     # 1. Останавливаем звук
