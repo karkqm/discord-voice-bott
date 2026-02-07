@@ -18,12 +18,21 @@ class LLMEngine:
         self._client: Optional[AsyncOpenAI] = None
 
     def start(self) -> None:
-        kwargs = {"api_key": self.config.OPENAI_API_KEY}
-        if self.config.OPENAI_BASE_URL:
-            kwargs["base_url"] = self.config.OPENAI_BASE_URL
-        self._client = AsyncOpenAI(**kwargs)
-        base = self.config.OPENAI_BASE_URL or "default"
-        log.info(f"LLM engine started (model={self.config.LLM_MODEL}, base_url={base})")
+        api_key = self.config.OPENAI_API_KEY
+        base_url = self.config.OPENAI_BASE_URL
+
+        if not api_key and not base_url:
+             log.warning("No OPENAI_API_KEY or OPENAI_BASE_URL set. LLM might fail.")
+
+        # Для локальных LLM ключ может быть любым, но не пустым
+        if self.config.IS_LOCAL_LLM and not api_key:
+            api_key = "local"
+
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url if base_url else None,
+        )
+        log.info(f"LLM engine started (model={self.config.LLM_MODEL}, base_url={base_url}, local={self.config.IS_LOCAL_LLM})")
 
     def stop(self) -> None:
         self._client = None

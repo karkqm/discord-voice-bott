@@ -39,6 +39,10 @@ llm_engine = LLMEngine(config)
 tts_engine = TTSEngine(
     engine=config.TTS_ENGINE,
     voice=config.TTS_VOICE,
+    on_audio_chunk=lambda chunk, rate: asyncio.run_coroutine_threadsafe(
+        voice_player.play_stream_chunk(chunk, rate), 
+        bot.loop
+    )
 )
 voice_player = VoicePlayer()
 screen_capture = ScreenCapture(
@@ -65,6 +69,23 @@ def on_stt_text_ready(text: str, user_id: int) -> None:
     )
 
 
+def on_user_speech_begin() -> None:
+    """Колбэк: пользователь начал говорить (Barge-in)."""
+    log.info("[BARGE-IN] User started speaking, stopping bot...")
+    
+    # 1. Останавливаем звук
+    voice_player.stop()
+    
+    # 2. Останавливаем TTS генерацию
+    tts_engine.stop()
+    
+    # 3. Отменяем генерацию LLM если идёт
+    global generation_task
+    if generation_task and not generation_task.done():
+        generation_task.cancel()
+        log.info("[BARGE-IN] LLM generation cancelled")
+
+
 def on_voice_audio_chunk(audio_data: bytes, user_id: int) -> None:
     """Колбэк: аудио-чанк от пользователя в реальном времени — подаём в STT."""
     if stt_engine:
@@ -80,25 +101,50 @@ def on_screen_frame_ready(frame_b64: str) -> None:
         )
 
 
+# Глобальная задача генерации (для отмены)
+generation_task: Optional[asyncio.Task] = None
+
 async def handle_user_speech(text: str, user_id: int) -> None:
     """Обрабатывает распознанную речь пользователя."""
     try:
+        user_name = f"User_{user_id}"
+        for guild in bot.guilds:
+            member = guild.get_member(user_id)
+            if member:
+                user_name = member.display_name
+                break
+
+        # Проверяем, обращаются ли к боту
+        is_addressed = conversation.is_addressed_to_bot(text)
+        
+        # ВАЖНО: Всегда добавляем в историю, чтобы бот помнил контекст
+        conversation.add_user_message(text, user_name)
+
+        if not is_addressed:
+            log.info(f"Ignoring speech (not addressed to bot): {text}")
+            return
+
         async with _processing_lock:
             log.info(f"[PIPELINE] Processing speech from {user_id}: {text}")
-            user_name = f"User_{user_id}"
-            for guild in bot.guilds:
-                member = guild.get_member(user_id)
-                if member:
-                    user_name = member.display_name
-                    break
-
-            conversation.add_user_message(text, user_name)
-
-            await generate_and_speak(
-                include_screen=screen_capture.last_frame is not None,
-                include_minecraft=minecraft_bot.is_running
+            
+            global generation_task
+            # Отменяем предыдущую задачу если вдруг жива
+            if generation_task and not generation_task.done():
+                generation_task.cancel()
+                
+            generation_task = asyncio.create_task(
+                generate_and_speak(
+                    include_screen=screen_capture.last_frame is not None,
+                    include_minecraft=minecraft_bot.is_running
+                )
             )
+            try:
+                await generation_task
+            except asyncio.CancelledError:
+                 log.info("[PIPELINE] Handle speech cancelled (barge-in or new request)")
+            
             log.info("[PIPELINE] Speech processing complete")
+            
     except Exception as e:
         log.error(f"[PIPELINE] handle_user_speech error: {e}", exc_info=True)
 
@@ -195,14 +241,8 @@ async def generate_and_speak(
             full_response += " " + sentence
             log.info(f"[PIPELINE] LLM sentence: {sentence}")
 
-            if not tts_engine._ready:
-                continue # Skip if TTS not ready
-
-            # Синтезируем и воспроизводим каждо предложение сразу
-            audio_data = await tts_engine.synthesize(sentence)
-            if audio_data:
-                log.info(f"[PIPELINE] Playing {len(audio_data)} bytes")
-                await voice_player.play_audio(audio_data)
+            # Отправляем в TTS (стриминг начнётся через колбэк)
+            tts_engine.feed(sentence)
 
         if full_response.strip():
             conversation.add_bot_message(full_response.strip())
@@ -227,11 +267,16 @@ async def on_ready():
     # TTS и STT — тяжёлые, запускаем в фоне (не блокируют event loop)
     tts_engine.start()
 
-    stt_engine = STTEngine(
-        model=config.STT_MODEL,
-        language=config.STT_LANGUAGE,
-        on_text_ready=on_stt_text_ready,
-    )
+    stt_kwargs = {
+        "model": config.STT_MODEL,
+        "language": config.STT_LANGUAGE,
+        "on_text_ready": on_stt_text_ready,
+    }
+    
+    if config.STT_BACKEND == "realtime":
+        stt_kwargs["on_speech_begin"] = on_user_speech_begin
+
+    stt_engine = STTEngine(**stt_kwargs)
     stt_engine.start()
 
     log.info("Bot ready! TTS and STT loading in background...")

@@ -1,35 +1,22 @@
-import os
-import tempfile
 import threading
-from typing import Optional
+from typing import Optional, Callable
 
 from utils.logger import setup_logger
 
 log = setup_logger("tts_engine")
 
-# Добавляем директорию проекта в PATH для mpv.exe и libmpv-2.dll
-_project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _project_dir not in os.environ.get("PATH", ""):
-    os.environ["PATH"] = _project_dir + os.pathsep + os.environ.get("PATH", "")
-try:
-    os.add_dll_directory(_project_dir)
-except (OSError, AttributeError):
-    pass
-
-
 class TTSEngine:
-    """TTS через RealtimeTTS (EdgeEngine) — стриминговый синтез речи.
-    
-    Записывает аудио в WAV файл через output_wavfile, затем отдаёт байты.
-    """
+    """TTS через RealtimeTTS (EdgeEngine) — стриминговый синтез речи."""
 
     def __init__(
         self,
         engine: str = "edge",
         voice: str = "ru-RU-DmitryNeural",
+        on_audio_chunk: Optional[Callable[[bytes, int], None]] = None
     ):
         self.engine_name = engine
         self.voice = voice
+        self.on_audio_chunk = on_audio_chunk
         self._stream = None
         self._ready = False
         self._is_speaking = False
@@ -45,70 +32,68 @@ class TTSEngine:
         try:
             from RealtimeTTS import TextToAudioStream, EdgeEngine
 
+            # TODO: Поддержка Coqui/System если нужно, пока только Edge
             tts_engine = EdgeEngine()
             tts_engine.set_voice(self.voice)
 
-            self._stream = TextToAudioStream(tts_engine, log_characters=False)
+            self._stream = TextToAudioStream(
+                tts_engine, 
+                log_characters=False,
+                on_audio_stream_start=self._on_stream_start,
+                on_audio_stream_stop=self._on_stream_stop,
+            )
             self._ready = True
             log.info(f"TTS engine ready (RealtimeTTS EdgeEngine, voice={self.voice})")
         except Exception as e:
             log.error(f"Failed to start TTS engine: {e}", exc_info=True)
 
-    def _synthesize_sync(self, text: str, tmp_path: str) -> Optional[bytes]:
-        """Синхронный синтез — вызывается в executor."""
-        try:
-            self._stream.feed(text)
-            self._stream.play(
-                output_wavfile=tmp_path,
-                muted=True,
-                language="ru",
-            )
-
-            if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
-                with open(tmp_path, 'rb') as f:
-                    return f.read()
-            return None
-        except Exception as e:
-            log.error(f"TTS synthesis error: {e}", exc_info=True)
-            return None
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
-
-    async def synthesize(self, text: str) -> Optional[bytes]:
-        """Синтезирует текст в WAV аудио через RealtimeTTS (не блокирует event loop).
-        
-        Args:
-            text: Текст для озвучивания
-            
-        Returns:
-            WAV байты или None при ошибке
-        """
-        if not self._ready or not self._stream or not text.strip():
-            return None
-
+    def _on_stream_start(self):
         self._is_speaking = True
-        tmp_path = tempfile.mktemp(suffix=".wav")
-        try:
-            import asyncio
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, self._synthesize_sync, text, tmp_path)
-            if result:
-                log.info(f"TTS synthesized {len(result)} bytes for: {text[:50]}...")
-            return result
-        finally:
-            self._is_speaking = False
 
-    def interrupt(self) -> None:
+    def _on_stream_stop(self):
         self._is_speaking = False
+
+    def feed(self, text: str) -> None:
+        """Подает текст в TTS поток."""
+        if not self._ready or not self._stream:
+            log.warning("TTS not ready, skipping text")
+            return
+            
+        if not text.strip():
+            return
+
+        # Если поток еще не играет, запускаем (в отдельном потоке RealtimeTTS)
+        if not self._stream.is_playing():
+             # play_async запустит worker.
+             self._stream.play_async(
+                 muted=True,                 # Не играть на динамики сервера
+                 on_audio_chunk=self._on_chunk_wrapper,
+                 language="ru"
+             )
+        
+        self._stream.feed(text)
+        log.debug(f"TTS feed: {text[:30]}...")
+
+    def _on_chunk_wrapper(self, chunk: bytes):
+        """Обертка для колбэка, чтобы передавать sample_rate если нужно."""
+        if self.on_audio_chunk:
+            # EdgeTTS дает 24000Hz mono (обычно).
+            self.on_audio_chunk(chunk, 24000)
+
+    def stop(self) -> None:
+        """Останавливает чтение и очищает очередь."""
         if self._stream:
             try:
                 self._stream.stop()
             except Exception:
                 pass
+        self._is_speaking = False
 
     @property
     def is_speaking(self) -> bool:
-        return self._is_speaking
+        return self._is_speaking or (self._stream and self._stream.is_playing())
+
+    async def synthesize(self, text: str) -> Optional[bytes]:
+        """Legacy метод (совместимость). Будет пустым."""
+        self.feed(text)
+        return None

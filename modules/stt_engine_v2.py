@@ -24,10 +24,12 @@ class STTEngine:
         model: str = "base",
         language: str = "ru",
         on_text_ready: Optional[Callable[[str, int], None]] = None,
+        on_speech_begin: Optional[Callable[[], None]] = None,
     ):
         self.model = model
         self.language = language
         self.on_text_ready = on_text_ready
+        self.on_speech_begin = on_speech_begin
         self._recorder = None
         self._ready = False
         self._current_user_id: int = 0
@@ -61,6 +63,7 @@ class STTEngine:
                 no_log_file=True,
                 level=50,
                 initial_prompt="Разговор на русском языке в Discord голосовом чате.",
+                on_recording_start=self._on_recording_start_wrapper,
             )
             self._ready = True
             log.info(f"STT engine v2 ready (RealtimeSTT, model={self.model}, CUDA)")
@@ -128,6 +131,14 @@ class STTEngine:
                 self._recorder.feed_audio(chunk)
         except Exception as e:
             log.error(f"Error feeding audio to STT: {e}")
+
+    def _on_recording_start_wrapper(self):
+        """Колбэк: началась запись (обнаружена речь)."""
+        if self.on_speech_begin:
+            try:
+                self.on_speech_begin()
+            except Exception as e:
+                log.error(f"Error in on_speech_begin callback: {e}")
 
     def stop(self) -> None:
         """Останавливает STT движок."""

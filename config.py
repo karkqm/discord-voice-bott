@@ -16,10 +16,13 @@ class Config:
     LLM_MODEL: str = os.getenv("LLM_MODEL", "gemini-2.5-flash-lite")
     LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "150"))
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.9"))
+    
+    # Custom / Local LLM
+    IS_LOCAL_LLM: bool = os.getenv("IS_LOCAL_LLM", "false").lower() == "true"
 
     # STT
     # STT_BACKEND: "onnx" (onnx-asr + DirectML/AMD) или "realtime" (RealtimeSTT + CUDA/NVIDIA)
-    STT_BACKEND: str = os.getenv("STT_BACKEND", "onnx")
+    STT_BACKEND: str = os.getenv("STT_BACKEND", "realtime")
     STT_MODEL: str = os.getenv("STT_MODEL", "onnx-community/whisper-base")
     STT_LANGUAGE: str = os.getenv("STT_LANGUAGE", "ru")
 
@@ -30,6 +33,10 @@ class Config:
     # Screen Capture
     SCREEN_CAPTURE_INTERVAL: int = int(os.getenv("SCREEN_CAPTURE_INTERVAL", "5"))
     SCREEN_CAPTURE_ENABLED: bool = os.getenv("SCREEN_CAPTURE_ENABLED", "true").lower() == "true"
+    
+    # Interaction
+    BOT_ALIASES: list[str] = os.getenv("BOT_ALIASES", "бот,алекс,андрей,слышь").split(",")
+    BARGE_IN_SENSITIVITY: float = float(os.getenv("BARGE_IN_SENSITIVITY", "0.5"))
 
     # Bot Personality
     BOT_NAME: str = os.getenv("BOT_NAME", "Андрей")

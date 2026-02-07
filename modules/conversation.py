@@ -112,6 +112,25 @@ class Conversation:
         self._history.clear()
         log.info("Conversation history cleared")
 
+    def is_addressed_to_bot(self, text: str) -> bool:
+        """Определяет, обращено ли сообщение к боту."""
+        text_lower = text.lower()
+        
+        # 1. Прямое обращение по имени
+        for alias in self.config.BOT_ALIASES:
+            if alias.lower() in text_lower:
+                return True
+        
+        # 2. Контекст диалога (ответ на вопрос бота)
+        if self._history:
+            last_msg = self._history[-1]
+            if last_msg["role"] == "assistant":
+                time_since_bot = time.time() - self._last_bot_speech_time
+                if time_since_bot < 10.0:  # 10 секунд на ответ
+                    return True
+                    
+        return False
+
     @property
     def last_user_speech_time(self) -> float:
         return self._last_user_speech_time

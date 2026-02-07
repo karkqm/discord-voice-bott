@@ -49,3 +49,27 @@ def int16_to_float32(audio: bytes) -> bytes:
     """Конвертирует int16 аудио в float32."""
     samples = np.frombuffer(audio, dtype=np.int16)
     return (samples.astype(np.float32) / 32767.0).tobytes()
+
+
+def resample_to_48k_stereo(pcm_data: bytes, sample_rate: int, channels: int = 1) -> bytes:
+    """Ресемплирует аудио в 48kHz stereo 16-bit PCM (стандарт Discord)."""
+    if not pcm_data:
+        return b""
+        
+    samples = np.frombuffer(pcm_data, dtype=np.int16)
+    
+    # 1. Ресемплинг если нужно
+    if sample_rate != 48000:
+        duration = len(samples) / sample_rate
+        new_length = int(duration * 48000)
+        # Простая линейная интерполяция (быстро)
+        indices = np.linspace(0, len(samples) - 1, new_length)
+        samples = np.interp(indices, np.arange(len(samples)), samples)
+        
+    # 2. Конвертация в стерео если моно
+    if channels == 1:
+        # Дублируем для стерео
+        # [[L, R], [L, R]...] -> flatten
+        samples = np.repeat(samples, 2)
+        
+    return samples.astype(np.int16).tobytes()
