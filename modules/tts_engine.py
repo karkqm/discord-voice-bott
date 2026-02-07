@@ -201,6 +201,12 @@ class TTSEngine:
         self._text_queue.put(text)
         log.debug(f"TTS queued: {text[:30]}...")
 
+    def wait_until_done(self, timeout: float = 30.0) -> None:
+        """Блокирует до завершения всех синтезов в очереди."""
+        deadline = time.time() + timeout
+        while (self._is_speaking or not self._text_queue.empty()) and time.time() < deadline:
+            time.sleep(0.05)
+
     def stop(self) -> None:
         """Останавливает синтез и очищает очередь."""
         while not self._text_queue.empty():

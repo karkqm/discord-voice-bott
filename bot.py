@@ -292,6 +292,15 @@ async def generate_and_speak(
         if full_response.strip():
             conversation.add_bot_message(full_response.strip())
         
+        # Ждём пока TTS доиграет все фрагменты
+        if sentence_count > 0:
+            await asyncio.get_event_loop().run_in_executor(
+                None, tts_engine.wait_until_done
+            )
+            # Ждём пока Discord доиграет буфер
+            while voice_player.is_playing:
+                await asyncio.sleep(0.1)
+        
         total_time = time.time() - pipeline_start
         llm_ms = (t_first_sentence - t_llm_start) * 1000 if t_first_sentence else 0
         resp_preview = full_response.strip()[:60]
