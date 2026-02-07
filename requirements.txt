@@ -2,6 +2,7 @@ py-cord[voice]==2.6.1
 openai>=1.40.0
 python-dotenv>=1.0.0
 RealtimeSTT>=0.3.0
+faster-whisper>=1.0.0
 torch>=2.0.0
 silero-tts>=0.0.5
 omegaconf>=2.3.0

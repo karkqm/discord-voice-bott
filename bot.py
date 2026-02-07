@@ -9,7 +9,7 @@ from discord.ext import commands
 from config import Config
 from modules.voice_receiver import RealtimeSink
 if Config().STT_BACKEND == "realtime":
-    from modules.stt_engine_v2 import STTEngine
+    from modules.stt_engine_v3 import STTEngine
 else:
     from modules.stt_engine import STTEngine
 from modules.llm_engine import LLMEngine
