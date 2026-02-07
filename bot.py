@@ -375,6 +375,13 @@ async def on_ready():
     # LLM — лёгкий, можно синхронно
     llm_engine.start()
 
+    # Web search — передаём LLM credentials для переформулировки запросов
+    web_search.init(
+        api_key=config.OPENAI_API_KEY,
+        base_url=config.OPENAI_BASE_URL or "https://api.openai.com/v1",
+        model=config.LLM_MODEL,
+    )
+
     # TTS и STT — тяжёлые, запускаем в фоне (не блокируют event loop)
     tts_engine.start()
 
