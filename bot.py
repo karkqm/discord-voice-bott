@@ -17,7 +17,15 @@ from modules.tts_engine import TTSEngine
 from modules.voice_player import VoicePlayer
 from modules.screen_capture import ScreenCapture
 from modules.conversation import Conversation
-from modules.minecraft_bot import MinecraftBot
+
+# MinecraftBot is optional (requires Node.js + javascript pip package)
+try:
+    from modules.minecraft_bot import MinecraftBot
+    MINECRAFT_AVAILABLE = True
+except ImportError:
+    MinecraftBot = None
+    MINECRAFT_AVAILABLE = False
+
 from utils.logger import setup_logger
 
 log = setup_logger("bot")
