@@ -244,10 +244,25 @@ async def generate_and_speak(
         
         log.debug(f"[GEN] Calling LLM ({len(messages)} messages)")
 
+        _name_prefixes = [
+            f"{config.BOT_NAME}:", f"[{config.BOT_NAME}]",
+            f"{config.BOT_NAME} говорит:", f"{config.BOT_NAME} отвечает:",
+        ]
+        _name_prefixes_lower = [p.lower() for p in _name_prefixes]
+
         async for sentence in llm_engine.generate_stream(messages, screen_frame):
             # Если попросили заткнуться — прекращаем озвучку (но LLM стрим дочитываем)
             if _shutup:
                 log.debug("[GEN] Shutup flag — skipping TTS")
+                continue
+
+            # Убираем имя бота из начала ответа (LLM иногда пишет "Андрей: ...")
+            s_lower = sentence.lstrip().lower()
+            for prefix in _name_prefixes_lower:
+                if s_lower.startswith(prefix):
+                    sentence = sentence.lstrip()[len(prefix):].lstrip()
+                    break
+            if not sentence.strip():
                 continue
                 
             # Проверяем на наличие команд Minecraft
