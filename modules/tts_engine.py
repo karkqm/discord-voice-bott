@@ -31,6 +31,7 @@ class TTSEngine:
         self.voice = voice
         self.on_audio_chunk = on_audio_chunk
         self._model = None
+        self._silero_pkg = None
         self._ready = False
         self._is_speaking = False
         self._stopped = False
@@ -91,8 +92,14 @@ class TTSEngine:
                     trust_repo=True,
                 )
                 if model is not None and hasattr(model, 'save_wav'):
-                    self._model = model.to(self._device)
-                    log.info("Loaded via torch.hub")
+                    self._model = model
+                    # Перемещаем на GPU если нужно
+                    if self._device == "cuda":
+                        try:
+                            self._model = model.to(torch.device('cuda')) or model
+                        except Exception:
+                            pass
+                    log.info(f"Loaded via torch.hub (type={type(model).__name__})")
                 else:
                     raise RuntimeError(f"Invalid model: {type(model)}")
             except Exception as hub_err:
