@@ -64,9 +64,8 @@ minecraft_bot = MinecraftBot(bot_name=config.BOT_NAME) if MINECRAFT_AVAILABLE el
 # STT создаётся позже, т.к. нужны колбэки
 stt_engine: Optional[STTEngine] = None
 
-# Генерация: одна активная задача, новые сообщения копятся в очередь
+# Генерация: одна активная задача
 _generation_task: Optional[asyncio.Task] = None
-_pending_response: bool = False  # есть новые addressed сообщения для ответа
 
 # Команды "заткнись" — только прямые команды боту
 _SHUTUP_PATTERNS = [
@@ -113,7 +112,7 @@ def on_screen_frame_ready(frame_b64: str) -> None:
 
 async def handle_user_speech(text: str, user_id: int) -> None:
     """Обрабатывает распознанную речь пользователя."""
-    global _generation_task, _pending_response
+    global _generation_task
     
     try:
         user_name = f"User_{user_id}"
@@ -131,7 +130,6 @@ async def handle_user_speech(text: str, user_id: int) -> None:
                 _generation_task.cancel()
             tts_engine.stop()
             voice_player.stop()
-            _pending_response = False
             return
 
         # Проверяем, обращаются ли к боту
@@ -146,55 +144,37 @@ async def handle_user_speech(text: str, user_id: int) -> None:
 
         log.info(f"{BOLD}{user_name}{RESET}: {text}")
 
-        # Если бот сейчас говорит/генерирует — не перебиваем, а ставим в очередь
+        # Если бот сейчас генерирует — останавливаем и начинаем заново с новым контекстом
         if _generation_task and not _generation_task.done():
-            _pending_response = True
-            log.info(f"{YELLOW}[ОЧЕРЕДЬ] Бот говорит, отвечу после{RESET}")
-            return
+            _generation_task.cancel()
+            tts_engine.stop()
+            voice_player.stop()
+            log.info(f"{YELLOW}[ПЕРЕЗАПУСК] Новое обращение, перегенерирую...{RESET}")
+            # Даём время на отмену
+            try:
+                await _generation_task
+            except (asyncio.CancelledError, Exception):
+                pass
         
-        # Бот свободен — отвечаем сразу
-        _pending_response = False
-        _generation_task = asyncio.create_task(
-            _generate_response_loop()
-        )
+        # Запускаем новую генерацию
+        _generation_task = asyncio.create_task(_do_generate())
             
     except Exception as e:
         log.error(f"[PIPELINE] handle_user_speech error: {e}", exc_info=True)
 
 
-async def _generate_response_loop() -> None:
-    """Генерирует ответ и проверяет очередь после завершения."""
-    global _pending_response
-    
-    _pending_response = False
+async def _do_generate() -> None:
+    """Генерирует один ответ."""
     try:
         await generate_and_speak(
             include_screen=screen_capture.last_frame is not None,
             include_minecraft=minecraft_bot.is_running if minecraft_bot else False
         )
     except asyncio.CancelledError:
-        log.info("Generation cancelled (shut up)")
-        tts_engine.stop()
-        voice_player.stop()
+        log.debug("Generation cancelled")
         return
     except Exception as e:
         log.error(f"[PIPELINE] generate error: {e}")
-    
-    # Если накопились сообщения — отвечаем ещё раз
-    if _pending_response:
-        log.info(f"{CYAN}[ОЧЕРЕДЬ] Отвечаю на накопившиеся сообщения...{RESET}")
-        _pending_response = False
-        try:
-            await generate_and_speak(
-                include_screen=screen_capture.last_frame is not None,
-                include_minecraft=minecraft_bot.is_running if minecraft_bot else False
-            )
-        except asyncio.CancelledError:
-            tts_engine.stop()
-            voice_player.stop()
-            return
-        except Exception as e:
-            log.error(f"[PIPELINE] generate error: {e}")
 
 
 async def handle_screen_comment(frame_b64: str) -> None:
@@ -299,12 +279,7 @@ async def generate_and_speak(
         if full_response.strip():
             conversation.add_bot_message(full_response.strip())
         
-        # Ждём пока TTS досинтезирует все фрагменты
-        if sentence_count > 0:
-            await asyncio.get_event_loop().run_in_executor(
-                None, tts_engine.wait_until_done
-            )
-        # Сигнализируем плееру что данных больше не будет
+        # Сигнализируем плееру что данных больше не будет (не блокируем — TTS доиграет сам)
         voice_player.mark_done()
         
         total_time = time.time() - pipeline_start
