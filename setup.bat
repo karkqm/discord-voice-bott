@@ -1,4 +1,5 @@
 @echo off
+setlocal EnableDelayedExpansion
 title Discord Voice Bot - Setup
 
 echo ============================================
@@ -80,10 +81,20 @@ echo.
 
 :: Install PyTorch
 if "%HAS_NVIDIA%"=="1" (
-    echo [*] Installing PyTorch with CUDA...
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 --quiet
-    pip install nvidia-cublas-cu12 nvidia-cudnn-cu12 --quiet
-    echo [OK] PyTorch CUDA installed
+    :: Check if RTX 50xx series (needs nightly PyTorch with cu128)
+    set IS_RTX50=0
+    for /f "tokens=*" %%g in ('nvidia-smi --query-gpu=name --format=csv,noheader 2^>nul') do (
+        echo %%g | findstr /i "50" >nul && set IS_RTX50=1
+    )
+    if "!IS_RTX50!"=="1" (
+        echo [*] RTX 50xx detected - installing PyTorch nightly with CUDA 12.8...
+        pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 --quiet
+        echo [OK] PyTorch nightly CUDA 12.8 installed
+    ) else (
+        echo [*] Installing PyTorch with CUDA 12.1...
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 --quiet
+        echo [OK] PyTorch CUDA 12.1 installed
+    )
 ) else (
     echo [*] Installing PyTorch CPU...
     pip install torch torchvision torchaudio --quiet
