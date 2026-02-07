@@ -74,33 +74,29 @@ class TTSEngine:
             
             log.info(f"Loading Silero TTS v4 on {self._device}...")
             
-            result = torch.hub.load(
-                repo_or_dir='snakers4/silero-models',
-                model='silero_tts',
-                language='ru',
-                speaker='v4_ru',
-                trust_repo=True,
-            )
+            # Download model directly via torch.package (more reliable than torch.hub)
+            import os
+            model_dir = os.path.join(os.path.expanduser("~"), ".cache", "silero_tts")
+            os.makedirs(model_dir, exist_ok=True)
+            model_path = os.path.join(model_dir, "v4_ru.pt")
             
-            # Debug: log what torch.hub.load returned
-            log.info(f"Silero hub.load returned type={type(result)}")
-            if isinstance(result, (list, tuple)):
-                log.info(f"  Length={len(result)}, types={[type(x).__name__ for x in result]}")
-                # Find the model object (has apply_tts method)
-                self._model = None
-                for item in result:
-                    if hasattr(item, 'apply_tts'):
-                        self._model = item
-                        break
-                if self._model is None and len(result) > 0:
-                    self._model = result[0]
+            if not os.path.exists(model_path):
+                log.info("Downloading Silero TTS v4_ru model...")
+                torch.hub.download_url_to_file(
+                    "https://models.silero.ai/models/tts/ru/v4_ru.pt",
+                    model_path
+                )
+                log.info(f"Model downloaded to {model_path}")
             else:
-                self._model = result
+                log.info(f"Using cached model: {model_path}")
             
-            if self._model is None or not hasattr(self._model, 'apply_tts'):
-                raise RuntimeError(f"Silero model invalid: type={type(self._model)}, has apply_tts={hasattr(self._model, 'apply_tts') if self._model else 'None'}")
-            
+            self._model = torch.package.PackageImporter(model_path).load_pickle("tts_models", "model")
             self._model = self._model.to(self._device)
+            
+            log.info(f"Model loaded: type={type(self._model)}, has apply_tts={hasattr(self._model, 'apply_tts')}")
+            
+            if not hasattr(self._model, 'apply_tts'):
+                raise RuntimeError(f"Silero model has no apply_tts method. Type: {type(self._model)}")
             
             # Прогрев модели
             log.info("Warming up TTS model...")
