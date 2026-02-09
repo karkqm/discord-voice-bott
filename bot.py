@@ -74,7 +74,7 @@ _pending: bool = False
 _shutup: bool = False
 
 # ID голосового канала для автоматического подключения
-AUTO_JOIN_CHANNEL_ID: int = int(os.getenv("AUTO_JOIN_CHANNEL_ID", "0"))
+AUTO_JOIN_CHANNEL_ID: int = int(os.getenv("AUTO_JOIN_CHANNEL_ID", "0") or "0")
 
 # Текстовый канал для отправки ссылок (устанавливается при подключении)
 _text_channel: Optional[discord.TextChannel] = None
