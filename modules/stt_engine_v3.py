@@ -55,11 +55,13 @@ class STTEngine:
         language: str = "ru",
         on_text_ready: Optional[Callable[[str, int], None]] = None,
         on_speech_begin: Optional[Callable[[], None]] = None,
+        gpu_backend: str = "cpu",
     ):
         self.model_name = model
         self.language = language
         self.on_text_ready = on_text_ready
         self.on_speech_begin = on_speech_begin
+        self.gpu_backend = gpu_backend  # cuda, rocm, cpu
         
         self._whisper_model = None
         self._vad_model = None
@@ -113,10 +115,25 @@ class STTEngine:
             log.info(f"Loading faster-whisper model '{self.model_name}'...")
             from faster_whisper import WhisperModel
             
+            # Выбор устройства по GPU_BACKEND
+            if self.gpu_backend == "cuda":
+                device = "cuda"
+                compute_type = "float16"
+                log.info("STT: using CUDA (NVIDIA)")
+            elif self.gpu_backend == "rocm":
+                # AMD ROCm: faster-whisper использует CPU-путь, но ROCm ускоряет через torch
+                device = "cpu"
+                compute_type = "int8"
+                log.info("STT: using CPU path (AMD ROCm — faster-whisper не поддерживает ROCm напрямую)")
+            else:
+                device = "cpu"
+                compute_type = "int8"
+                log.info("STT: using CPU")
+
             self._whisper_model = WhisperModel(
                 self.model_name,
-                device="cuda",
-                compute_type="float16",
+                device=device,
+                compute_type=compute_type,
             )
             log.info(f"Whisper '{self.model_name}' loaded, warming up...")
             

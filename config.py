@@ -23,12 +23,19 @@ class Config:
     # STT
     # STT_BACKEND: "onnx" (onnx-asr + DirectML/AMD) или "realtime" (RealtimeSTT + CUDA/NVIDIA)
     STT_BACKEND: str = os.getenv("STT_BACKEND", "realtime")
-    STT_MODEL: str = os.getenv("STT_MODEL", "onnx-community/whisper-base")
+    # realtime backend: large-v3-turbo, large-v3, medium, base, small
+    # onnx backend: onnx-community/whisper-base, onnx-community/whisper-medium etc.
+    STT_MODEL: str = os.getenv("STT_MODEL", "large-v3-turbo")
     STT_LANGUAGE: str = os.getenv("STT_LANGUAGE", "ru")
 
-    # TTS (Silero v4)
+    # GPU Backend: cuda (NVIDIA), rocm (AMD, через CPU-путь faster-whisper), cpu
+    GPU_BACKEND: str = os.getenv("GPU_BACKEND", "cpu")
+
+    # TTS
     TTS_ENGINE: str = os.getenv("TTS_ENGINE", "silero")
     TTS_VOICE: str = os.getenv("TTS_VOICE", "xenia")  # xenia, aidar, baya, kseniya, eugene
+    # Kokoro TTS voice (используется когда TTS_ENGINE=kokoro)
+    KOKORO_VOICE: str = os.getenv("KOKORO_VOICE", "af_heart")
 
     # Screen Capture
     SCREEN_CAPTURE_INTERVAL: int = int(os.getenv("SCREEN_CAPTURE_INTERVAL", "5"))

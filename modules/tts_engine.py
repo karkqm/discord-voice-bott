@@ -12,41 +12,92 @@ log = setup_logger("tts_engine")
 
 # Silero TTS sample rate
 SILERO_SAMPLE_RATE = 48000
+# Kokoro TTS sample rate
+KOKORO_SAMPLE_RATE = 24000
 
 
 class TTSEngine:
-    """TTS через Silero v4 — локальный, быстрый, CUDA.
-    
-    Использует silero_tts для скачивания модели, затем вызывает модель напрямую
-    (без файлового I/O) для максимальной скорости.
+    """TTS движок. Поддерживаемые движки:
+    - kokoro: Kokoro ONNX (локальный, низкая задержка, ~24kHz) — рекомендуется
+    - silero: Silero v4 (локальный, CUDA, ~48kHz) — хороший fallback
+    - edge: Microsoft Edge TTS (онлайн)
     """
 
     def __init__(
         self,
         engine: str = "silero",
         voice: str = "xenia",
-        on_audio_chunk: Optional[Callable[[bytes, int], None]] = None
+        on_audio_chunk: Optional[Callable[[bytes, int], None]] = None,
+        kokoro_voice: str = "af_heart",
     ):
         self.engine_name = engine
         self.voice = voice
+        self.kokoro_voice = kokoro_voice
         self.on_audio_chunk = on_audio_chunk
         self._model = None
         self._silero_pkg = None
+        self._kokoro = None
         self._ready = False
         self._is_speaking = False
         self._stopped = False
         self._device = "cpu"
+        self._sample_rate = SILERO_SAMPLE_RATE
         
         # Очередь текста для синтеза
         self._text_queue: queue.Queue = queue.Queue()
         self._worker_thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
-        """Запускает инициализацию Silero TTS в фоновом потоке."""
+        """Запускает инициализацию TTS в фоновом потоке."""
         self._stopped = False
-        self._init_thread = threading.Thread(target=self._init_engine, daemon=True)
+        if self.engine_name == "kokoro":
+            self._init_thread = threading.Thread(target=self._init_kokoro, daemon=True)
+        else:
+            self._init_thread = threading.Thread(target=self._init_engine, daemon=True)
         self._init_thread.start()
-        log.info("TTS engine initialization started in background...")
+        log.info(f"TTS engine ({self.engine_name}) initialization started in background...")
+
+    def _init_kokoro(self) -> None:
+        """Инициализация Kokoro ONNX TTS."""
+        try:
+            from kokoro_onnx import Kokoro
+            log.info(f"Loading Kokoro TTS (voice={self.kokoro_voice})...")
+            self._kokoro = Kokoro("kokoro-v1.0.onnx", "voices-v1.0.bin")
+            self._sample_rate = KOKORO_SAMPLE_RATE
+            # Прогрев
+            samples, _ = self._kokoro.create("Привет.", voice=self.kokoro_voice, speed=1.0, lang="ru")
+            log.info(f"Kokoro TTS ready (voice={self.kokoro_voice}, {self._sample_rate}Hz)")
+            self._ready = True
+            self._worker_thread = threading.Thread(target=self._synthesis_worker, daemon=True)
+            self._worker_thread.start()
+        except ImportError:
+            log.error("kokoro-onnx not installed! Run: pip install kokoro-onnx")
+            log.warning("Falling back to Silero TTS...")
+            self.engine_name = "silero"
+            self._init_engine()
+        except Exception as e:
+            log.error(f"Failed to start Kokoro TTS: {e}", exc_info=True)
+            log.warning("Falling back to Silero TTS...")
+            self.engine_name = "silero"
+            self._init_engine()
+
+    def _synthesize_kokoro(self, text: str) -> Optional[bytes]:
+        """Синтез через Kokoro ONNX → PCM int16."""
+        if not self._kokoro:
+            return None
+        clean = text.strip().rstrip('.,!?;:…—')
+        if len(clean) < 2:
+            return None
+        try:
+            samples, sample_rate = self._kokoro.create(
+                text, voice=self.kokoro_voice, speed=1.0, lang="ru"
+            )
+            # samples — float32 array [-1, 1], конвертируем в int16
+            pcm = (samples * 32767).astype(np.int16)
+            return pcm.tobytes()
+        except Exception as e:
+            log.error(f"Kokoro synth error: {e}", exc_info=True)
+            return None
 
     def _check_cuda_compatible(self) -> bool:
         """Проверяет совместимость GPU с текущей версией PyTorch."""
@@ -183,17 +234,18 @@ class TTSEngine:
                 self._is_speaking = True
                 t0 = time.time()
                 
-                pcm_bytes = self._synthesize_pcm(text)
+                if self.engine_name == "kokoro":
+                    pcm_bytes = self._synthesize_kokoro(text)
+                else:
+                    pcm_bytes = self._synthesize_pcm(text)
                 
                 elapsed = (time.time() - t0) * 1000
                 
                 if pcm_bytes:
-                    pcm_int16 = np.frombuffer(pcm_bytes, dtype=np.int16)
-                    duration = len(pcm_int16) / SILERO_SAMPLE_RATE
                     log.info(f"({elapsed:.0f}ms) {text[:50]}")
                     
                     if self.on_audio_chunk and not self._stopped:
-                        self.on_audio_chunk(pcm_bytes, SILERO_SAMPLE_RATE)
+                        self.on_audio_chunk(pcm_bytes, self._sample_rate)
                     
             except Exception as e:
                 log.error(f"TTS synthesis error: {e}", exc_info=True)

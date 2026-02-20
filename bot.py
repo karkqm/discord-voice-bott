@@ -53,6 +53,7 @@ llm_engine = LLMEngine(config)
 tts_engine = TTSEngine(
     engine=config.TTS_ENGINE,
     voice=config.TTS_VOICE,
+    kokoro_voice=config.KOKORO_VOICE,
     on_audio_chunk=lambda chunk, rate: asyncio.run_coroutine_threadsafe(
         voice_player.play_stream_chunk(chunk, rate), 
         bot.loop
@@ -616,6 +617,7 @@ async def on_ready():
         "model": config.STT_MODEL,
         "language": config.STT_LANGUAGE,
         "on_text_ready": on_stt_text_ready,
+        "gpu_backend": config.GPU_BACKEND,
     }
     
     stt_engine = STTEngine(**stt_kwargs)
@@ -627,6 +629,48 @@ async def on_ready():
     if AUTO_JOIN_CHANNEL_ID:
         await asyncio.sleep(2)  # Даём время на загрузку TTS/STT
         await _auto_join_voice()
+
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    """Автономный режим: бот сам заходит/выходит из голосовых каналов."""
+    global _text_channel
+
+    # Игнорируем самого себя
+    if member == bot.user:
+        return
+
+    vc = voice_player.voice_client
+    bot_channel = vc.channel if vc and vc.is_connected() else None
+
+    # Пользователь зашёл в голосовой канал
+    if after.channel and after.channel != before.channel:
+        # Если бот ещё нигде не сидит — подключаемся к тому же каналу
+        if not bot_channel:
+            log.info(f"[AUTO-JOIN] {member.display_name} joined {after.channel.name} — connecting")
+            await voice_player.connect(after.channel)
+            vc = voice_player.voice_client
+            if vc:
+                sink = RealtimeSink(on_audio_chunk=on_voice_audio_chunk, bot_user_id=bot.user.id)
+                vc.start_recording(sink, _on_recording_done, None)
+                log.info("Started realtime audio recording")
+            # Ищем текстовый канал в том же сервере
+            for tc in after.channel.guild.text_channels:
+                if tc.permissions_for(after.channel.guild.me).send_messages:
+                    _text_channel = tc
+                    break
+
+    # Пользователь вышел из канала где сидит бот — проверяем пустоту
+    if before.channel and before.channel == bot_channel:
+        non_bot_members = [m for m in before.channel.members if not m.bot]
+        if not non_bot_members:
+            log.info(f"[AUTO-LEAVE] Channel {before.channel.name} is empty — leaving")
+            vc2 = voice_player.voice_client
+            if vc2 and vc2.recording:
+                vc2.stop_recording()
+            screen_capture.stop()
+            await voice_player.disconnect()
+            conversation.clear()
 
 
 @bot.event
