@@ -633,19 +633,46 @@ async def on_ready():
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-    """Автономный режим: бот сам заходит/выходит из голосовых каналов."""
+    """Автономный режим: бот сам заходит/выходит. Также следит за стримами."""
     global _text_channel
-
-    # Игнорируем самого себя
-    if member == bot.user:
-        return
 
     vc = voice_player.voice_client
     bot_channel = vc.channel if vc and vc.is_connected() else None
 
-    # Пользователь зашёл в голосовой канал
+    # --- Обработка самого бота (переподключение при кике/дропе) ---
+    if member == bot.user:
+        if before.channel and not after.channel:
+            # Бота выкинули или соединение упало — ждём и пробуем переподключиться
+            log.warning(f"[RECONNECT] Bot disconnected from {before.channel.name}, reconnecting in 5s...")
+            await asyncio.sleep(5)
+            # Ищем канал где есть пользователи
+            for ch in before.channel.guild.voice_channels:
+                non_bots = [m for m in ch.members if not m.bot]
+                if non_bots:
+                    log.info(f"[RECONNECT] Rejoining {ch.name}")
+                    await voice_player.connect(ch)
+                    vc2 = voice_player.voice_client
+                    if vc2:
+                        sink = RealtimeSink(on_audio_chunk=on_voice_audio_chunk, bot_user_id=bot.user.id)
+                        vc2.start_recording(sink, _on_recording_done, None)
+                    break
+        return
+
+    # --- Стрим/демонстрация экрана ---
+    stream_started = (not before.self_stream) and after.self_stream
+    stream_stopped = before.self_stream and (not after.self_stream)
+    if stream_started and bot_channel and after.channel == bot_channel:
+        log.info(f"[STREAM] {member.display_name} started streaming")
+        tts_engine.stop(); voice_player.stop()
+        tts_engine.feed(f"{member.display_name} начал стримить — смотрю.")
+        voice_player.mark_done()
+        screen_capture.start()
+    elif stream_stopped and bot_channel:
+        log.info(f"[STREAM] {member.display_name} stopped streaming")
+        screen_capture.stop()
+
+    # --- Пользователь зашёл в голосовой канал ---
     if after.channel and after.channel != before.channel:
-        # Если бот ещё нигде не сидит — подключаемся к тому же каналу
         if not bot_channel:
             log.info(f"[AUTO-JOIN] {member.display_name} joined {after.channel.name} — connecting")
             await voice_player.connect(after.channel)
@@ -654,13 +681,12 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 sink = RealtimeSink(on_audio_chunk=on_voice_audio_chunk, bot_user_id=bot.user.id)
                 vc.start_recording(sink, _on_recording_done, None)
                 log.info("Started realtime audio recording")
-            # Ищем текстовый канал в том же сервере
             for tc in after.channel.guild.text_channels:
                 if tc.permissions_for(after.channel.guild.me).send_messages:
                     _text_channel = tc
                     break
 
-    # Пользователь вышел из канала где сидит бот — проверяем пустоту
+    # --- Пользователь вышел из канала где сидит бот ---
     if before.channel and before.channel == bot_channel:
         non_bot_members = [m for m in before.channel.members if not m.bot]
         if not non_bot_members:
@@ -750,13 +776,86 @@ async def show_status(ctx: commands.Context):
     status_lines = [
         f"**{config.BOT_NAME}** — статус",
         f"• LLM: `{config.LLM_MODEL}`",
-        f"• STT: RealtimeSTT (`{config.STT_MODEL}`)",
-        f"• TTS: RealtimeTTS (`{config.TTS_ENGINE}` / `{config.TTS_VOICE}`)",
+        f"• STT: `{config.STT_BACKEND}` / `{config.STT_MODEL}` / GPU: `{config.GPU_BACKEND}`",
+        f"• TTS: `{config.TTS_ENGINE}` / голос: `{config.TTS_VOICE if config.TTS_ENGINE != 'kokoro' else config.KOKORO_VOICE}`",
         f"• Голосовой канал: {'✅ подключён' if voice_player.voice_client else '❌ нет'}",
         f"• Анализ экрана: {'✅ вкл' if screen_capture.is_running else '❌ выкл'}",
+        f"• Игра: `{conversation.current_game or 'не задана'}`",
         f"• История: {conversation.history_length} сообщений",
     ]
     await ctx.send("\n".join(status_lines))
+
+
+@bot.command(name="game", aliases=["g"])
+async def set_game(ctx: commands.Context, *, game_name: str = ""):
+    """Сообщает боту в какую игру вы играете. Пример: !game Valorant
+    Без аргумента — сбрасывает игровой контекст."""
+    if not game_name:
+        conversation.current_game = None
+        await ctx.send("Игровой контекст сброшен.")
+        tts_engine.feed("Понял, ни во что не играем.")
+        voice_player.mark_done()
+    else:
+        conversation.current_game = game_name
+        await ctx.send(f"Запомнил: играем в **{game_name}**.")
+        tts_engine.stop(); voice_player.stop()
+        tts_engine.feed(f"Понял, играем в {game_name}.")
+        voice_player.mark_done()
+        log.info(f"[GAME] Set to: {game_name}")
+
+
+@bot.command(name="demo", aliases=["d"])
+async def analyze_screen(ctx: commands.Context, url: str = ""):
+    """Анализирует скриншот демонстрации экрана.
+    Использование: !demo <url> или !demo с прикреплённым изображением."""
+    import base64 as _b64
+    from io import BytesIO as _BytesIO
+
+    frame_b64 = None
+
+    # Вариант 1: прикреплённый файл
+    if ctx.message.attachments:
+        att = ctx.message.attachments[0]
+        if any(att.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"]):
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(att.url) as resp:
+                        image_bytes = await resp.read()
+                frame_b64 = screen_capture.capture_from_image(image_bytes)
+            except Exception as e:
+                await ctx.send(f"Не смог загрузить изображение: {e}")
+                return
+
+    # Вариант 2: URL в аргументе
+    elif url:
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        image_bytes = await resp.read()
+                        frame_b64 = screen_capture.capture_from_image(image_bytes)
+                    else:
+                        await ctx.send(f"Не удалось загрузить по URL (HTTP {resp.status})")
+                        return
+        except Exception as e:
+            await ctx.send(f"Ошибка загрузки URL: {e}")
+            return
+
+    if not frame_b64:
+        await ctx.send(
+            "Прикрепи скриншот или укажи URL. Пример:\n"
+            "`!demo https://i.imgur.com/xxx.png`\n"
+            "или отправь `!demo` с прикреплённым изображением."
+        )
+        return
+
+    # Сохраняем кадр и запускаем анализ
+    screen_capture._last_frame = frame_b64
+    await ctx.send("🖼️ Анализирую скриншот...")
+    await handle_screen_comment(frame_b64)
+    log.info(f"[DEMO] Analyzed screenshot from {ctx.author.display_name}")
 
 
 @bot.command(name="mc_join")

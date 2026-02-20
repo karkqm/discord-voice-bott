@@ -179,39 +179,36 @@ class TTSEngine:
             log.error(f"Failed to start TTS engine: {e}", exc_info=True)
 
     def _synthesize_pcm(self, text: str) -> Optional[bytes]:
-        """Синтезирует текст в PCM int16 bytes."""
-        import tempfile, os, wave
-        
-        # Silero v4 падает на слишком коротком тексте (< 3 символа без пунктуации)
+        """Синтезирует текст в PCM int16 bytes (без файлового I/O)."""
+        # Silero v4 падает на слишком коротком тексте
         clean = text.strip().rstrip('.,!?;:…—')
         if len(clean) < 2:
             log.debug(f"TTS skip too short: '{text}'")
             return None
-        
+
         try:
-            tmp_path = os.path.join(tempfile.gettempdir(), f"silero_tts_{threading.get_ident()}.wav")
-            
             if self._model is not None:
-                # torch.hub модель — save_wav напрямую (без silero_tts пакета)
-                self._model.save_wav(
+                # torch.hub модель: apply_tts() возвращает float32 тензор напрямую
+                audio_tensor = self._model.apply_tts(
                     text=text,
                     speaker=self.voice,
                     sample_rate=SILERO_SAMPLE_RATE,
-                    audio_path=tmp_path,
                 )
+                # float32 [-1, 1] → int16 bytes
+                pcm = (audio_tensor.numpy() * 32767).astype(np.int16)
+                return pcm.tobytes()
             else:
-                # silero_tts пакет
+                # silero_tts пакет: нет прямого тензорного API, используем BytesIO через WAV
+                import io as _io, wave, tempfile, os
+                tmp_path = os.path.join(tempfile.gettempdir(), f"silero_{threading.get_ident()}.wav")
                 self._silero_pkg.tts(text, tmp_path)
-            
-            with wave.open(tmp_path, 'rb') as wf:
-                pcm_bytes = wf.readframes(wf.getnframes())
-            
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
-            
-            return pcm_bytes
+                with wave.open(tmp_path, 'rb') as wf:
+                    pcm_bytes = wf.readframes(wf.getnframes())
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+                return pcm_bytes
         except ValueError:
             log.warning(f"TTS can't synthesize: '{text}' (too short/invalid)")
             return None

@@ -12,6 +12,8 @@ from utils.audio_utils import resample_to_48k_stereo
 
 log = setup_logger("voice_player")
 
+_stop_lock = threading.Lock()  # защищает stop() от гонки с play_stream_chunk()
+
 
 class PCMStreamAudioSource(discord.AudioSource):
     """Источник аудио для Discord, который читает из потока (очереди)."""
@@ -106,30 +108,36 @@ class VoicePlayer:
         pcm_48k = resample_to_48k_stereo(audio_data, sample_rate, channels=1)
 
         async with self._lock:
-            # Если уже играет наш стрим — просто добавляем данные
-            if self._voice_client.is_playing() and isinstance(self._voice_client.source, PCMStreamAudioSource):
-                self._voice_client.source.add_data(pcm_48k)
-                self._current_source = self._voice_client.source
-            else:
-                # Если молчит или играло что-то другое — запускаем новый стрим
-                self.stop() # на всякий случай
-                self._current_source = PCMStreamAudioSource()
-                self._current_source.add_data(pcm_48k)
-                self._voice_client.play(self._current_source, after=self._after_playback)
+            with _stop_lock:
+                # Если уже играет наш стрим — просто добавляем данные
+                if (self._current_source is not None
+                        and self._voice_client.is_playing()
+                        and isinstance(self._voice_client.source, PCMStreamAudioSource)):
+                    self._voice_client.source.add_data(pcm_48k)
+                    self._current_source = self._voice_client.source
+                else:
+                    # Остановить предыдущий источник если был
+                    if self._current_source:
+                        self._current_source.mark_finished()
+                        self._current_source = None
+                    if self._voice_client.is_playing():
+                        self._voice_client.stop()
+                    new_source = PCMStreamAudioSource()
+                    new_source.add_data(pcm_48k)
+                    self._current_source = new_source
+                    self._voice_client.play(new_source, after=self._after_playback)
 
-    async def play_audio(self, audio_data: bytes) -> None:
-        """Воспроизводит готовый кусок аудио (legacy wrapper)."""
-        # Предполагаем что это WAV или raw PCM?
-        # Для совместимости с ботом, который передает байты.
-        # Если это WAV с заголовком, надо бы скипнуть заголовок.
-        # Но пока просто считаем что это PCM или короткий WAV.
-        # Лучше использовать play_stream_chunk.
-        # Если это WAV файл целиком:
+    async def play_audio(self, audio_data: bytes, sample_rate: int = 48000) -> None:
+        """Воспроизводит готовый кусок аудио. Если WAV — парсит заголовок."""
         if audio_data.startswith(b'RIFF'):
-             # Пропускаем header (просто 44 байта, грубо)
-             audio_data = audio_data[44:]
-        
-        await self.play_stream_chunk(audio_data, sample_rate=24000)
+            import wave, io as _io
+            try:
+                with wave.open(_io.BytesIO(audio_data), 'rb') as wf:
+                    sample_rate = wf.getframerate()
+                    audio_data = wf.readframes(wf.getnframes())
+            except Exception:
+                audio_data = audio_data[44:]  # грубый fallback
+        await self.play_stream_chunk(audio_data, sample_rate=sample_rate)
 
     def _after_playback(self, error: Optional[Exception]) -> None:
         if error:
@@ -138,18 +146,19 @@ class VoicePlayer:
 
     def mark_done(self) -> None:
         """Помечает что данных больше не будет — плеер доиграет буфер и остановится."""
-        if self._current_source:
-            self._current_source.mark_finished()
+        with _stop_lock:
+            if self._current_source:
+                self._current_source.mark_finished()
 
     def stop(self) -> None:
-        """Останавливает текущее воспроизведение немедленно."""
-        if self._current_source:
-             self._current_source.mark_finished()
-        
+        """Останавливает текущее воспроизведение немедленно (thread-safe)."""
+        with _stop_lock:
+            src = self._current_source
+            self._current_source = None
+        if src:
+            src.mark_finished()
         if self._voice_client and self._voice_client.is_playing():
             self._voice_client.stop()
-            
-        self._current_source = None
 
     @property
     def is_playing(self) -> bool:

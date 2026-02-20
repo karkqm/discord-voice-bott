@@ -26,6 +26,7 @@ class Conversation:
         self._screen_comment_cooldown: float = 15.0  # секунд между комментариями экрана
         self._msgs_since_bot_spoke: int = 0  # сколько сообщений прошло без ответа бота
         self._interject_cooldown: float = 10.0  # минимум секунд между авто-вмешательствами
+        self.current_game: Optional[str] = None  # название текущей игры
 
     def get_messages(self, include_screen: bool = False, minecraft_context: Optional[str] = None) -> list[dict]:
         """Возвращает историю сообщений в формате OpenAI API.
@@ -39,9 +40,16 @@ class Conversation:
         """
         messages = [{"role": "system", "content": self.config.SYSTEM_PROMPT}]
 
-        if include_screen:
+        if self.current_game:
             messages[0]["content"] += (
-                "\nСейчас ты смотришь демонстрацию экрана друга и комментируешь игру. "
+                f"\nСейчас все играют в игру: {self.current_game}. "
+                "Ты в курсе этой игры, комментируй и реагируй как геймер который знает её."
+            )
+
+        if include_screen:
+            game_hint = f" в {self.current_game}" if self.current_game else ""
+            messages[0]["content"] += (
+                f"\nСейчас ты смотришь демонстрацию экрана друга{game_hint} и комментируешь. "
                 "Будь как зритель стрима — реагируй на интересные моменты."
             )
         
