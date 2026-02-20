@@ -663,13 +663,10 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     stream_stopped = before.self_stream and (not after.self_stream)
     if stream_started and bot_channel and after.channel == bot_channel:
         log.info(f"[STREAM] {member.display_name} started streaming")
-        tts_engine.stop(); voice_player.stop()
-        tts_engine.feed(f"{member.display_name} начал стримить — смотрю.")
-        voice_player.mark_done()
-        screen_capture.start()
+        await _start_demo_mode(streamer_name=member.display_name)
     elif stream_stopped and bot_channel:
         log.info(f"[STREAM] {member.display_name} stopped streaming")
-        screen_capture.stop()
+        _stop_demo_mode(announce=True)
 
     # --- Пользователь зашёл в голосовой канал ---
     if after.channel and after.channel != before.channel:
@@ -699,11 +696,60 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             conversation.clear()
 
 
+async def _start_demo_mode(streamer_name: Optional[str] = None) -> None:
+    """Включает режим демо/стрима: активирует screen_capture и объявляет голосом."""
+    screen_capture.start()
+    if streamer_name:
+        msg = f"{streamer_name} начал стримить — смотрю."
+    else:
+        msg = "Режим демо включён, буду комментировать."
+    tts_engine.stop()
+    voice_player.stop()
+    tts_engine.feed(msg)
+    voice_player.mark_done()
+    log.info(f"[DEMO] Mode ON (streamer={streamer_name})")
+
+
+def _stop_demo_mode(announce: bool = False) -> None:
+    """Выключает режим демо/стрима."""
+    screen_capture.stop()
+    if announce:
+        tts_engine.feed("Стрим закончился, не смотрю больше.")
+        voice_player.mark_done()
+    log.info("[DEMO] Mode OFF")
+
+
+async def _analyze_image_bytes(image_bytes: bytes) -> Optional[str]:
+    """Конвертирует картинку в base64 JPEG и возвращает строку (или None)."""
+    return screen_capture.capture_from_image(image_bytes)
+
+
 @bot.event
 async def on_message(message: discord.Message):
-    """Обрабатывает текстовые сообщения."""
+    """Обрабатывает текстовые сообщения. Автоматически реагирует на прикреплённые скрины."""
     if message.author == bot.user:
         return
+
+    # Автодетект скриншотов: если в канале скинули картинку — комментируем голосом
+    if (message.attachments and voice_player.voice_client
+            and not message.content.startswith("!")):
+        for att in message.attachments:
+            if any(att.filename.lower().endswith(ext)
+                   for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif"]):
+                try:
+                    import aiohttp
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(att.url) as resp:
+                            if resp.status == 200:
+                                image_bytes = await resp.read()
+                                frame_b64 = await _analyze_image_bytes(image_bytes)
+                                if frame_b64:
+                                    screen_capture._last_frame = frame_b64
+                                    log.info(f"[DEMO] Auto-detected image from {message.author.display_name}")
+                                    await handle_screen_comment(frame_b64)
+                                    break
+                except Exception as e:
+                    log.error(f"[DEMO] Auto-image error: {e}")
 
     # Обрабатываем команды
     await bot.process_commands(message)
@@ -743,24 +789,10 @@ async def leave_voice(ctx: commands.Context):
     vc = voice_player.voice_client
     if vc and vc.recording:
         vc.stop_recording()
-    screen_capture.stop()
+    _stop_demo_mode(announce=False)
     await voice_player.disconnect()
     conversation.clear()
     await ctx.send("Отключился! 👋")
-
-
-@bot.command(name="screen", aliases=["s"])
-async def toggle_screen(ctx: commands.Context):
-    """Включает/выключает анализ демонстрации экрана."""
-    if screen_capture.is_running:
-        screen_capture.stop()
-        await ctx.send("Анализ экрана выключен.")
-    else:
-        screen_capture.start()
-        await ctx.send(
-            f"Анализ экрана включён (каждые {config.SCREEN_CAPTURE_INTERVAL}с). "
-            "Начни демонстрацию экрана в Discord!"
-        )
 
 
 @bot.command(name="clear", aliases=["c"])
@@ -779,7 +811,7 @@ async def show_status(ctx: commands.Context):
         f"• STT: `{config.STT_BACKEND}` / `{config.STT_MODEL}` / GPU: `{config.GPU_BACKEND}`",
         f"• TTS: `{config.TTS_ENGINE}` / голос: `{config.TTS_VOICE if config.TTS_ENGINE != 'kokoro' else config.KOKORO_VOICE}`",
         f"• Голосовой канал: {'✅ подключён' if voice_player.voice_client else '❌ нет'}",
-        f"• Анализ экрана: {'✅ вкл' if screen_capture.is_running else '❌ выкл'}",
+        f"• Демо/стрим: {'✅ смотрю' if screen_capture.is_running else '❌ нет'}",
         f"• Игра: `{conversation.current_game or 'не задана'}`",
         f"• История: {conversation.history_length} сообщений",
     ]
@@ -804,38 +836,43 @@ async def set_game(ctx: commands.Context, *, game_name: str = ""):
         log.info(f"[GAME] Set to: {game_name}")
 
 
-@bot.command(name="demo", aliases=["d"])
-async def analyze_screen(ctx: commands.Context, url: str = ""):
-    """Анализирует скриншот демонстрации экрана.
-    Использование: !demo <url> или !demo с прикреплённым изображением."""
-    import base64 as _b64
-    from io import BytesIO as _BytesIO
+@bot.command(name="demo", aliases=["d", "s", "screen"])
+async def demo_command(ctx: commands.Context, url: str = ""):
+    """Единая команда для демонстрации экрана.
 
+    !demo          — включить/выключить режим наблюдения (бот комментирует стрим)
+    !demo <url>    — разово проанализировать скриншот по ссылке
+    !demo + файл   — разово проанализировать прикреплённый скриншот
+
+    Discord автоматически запускает режим когда кто-то начинает Go Live.
+    Также бот сам реагирует если кто-то скидывает скрин в текстовый чат.
+    """
     frame_b64 = None
 
-    # Вариант 1: прикреплённый файл
+    # --- Скриншот: прикреплённый файл ---
     if ctx.message.attachments:
-        att = ctx.message.attachments[0]
-        if any(att.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"]):
-            try:
-                import aiohttp
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(att.url) as resp:
-                        image_bytes = await resp.read()
-                frame_b64 = screen_capture.capture_from_image(image_bytes)
-            except Exception as e:
-                await ctx.send(f"Не смог загрузить изображение: {e}")
-                return
+        for att in ctx.message.attachments:
+            if any(att.filename.lower().endswith(ext)
+                   for ext in [".png", ".jpg", ".jpeg", ".webp"]):
+                try:
+                    import aiohttp
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(att.url) as resp:
+                            if resp.status == 200:
+                                frame_b64 = await _analyze_image_bytes(await resp.read())
+                except Exception as e:
+                    await ctx.send(f"Не смог загрузить изображение: {e}")
+                    return
+                break
 
-    # Вариант 2: URL в аргументе
+    # --- Скриншот: URL ---
     elif url:
         try:
             import aiohttp
             async with aiohttp.ClientSession() as session:
                 async with session.get(url) as resp:
                     if resp.status == 200:
-                        image_bytes = await resp.read()
-                        frame_b64 = screen_capture.capture_from_image(image_bytes)
+                        frame_b64 = await _analyze_image_bytes(await resp.read())
                     else:
                         await ctx.send(f"Не удалось загрузить по URL (HTTP {resp.status})")
                         return
@@ -843,19 +880,29 @@ async def analyze_screen(ctx: commands.Context, url: str = ""):
             await ctx.send(f"Ошибка загрузки URL: {e}")
             return
 
-    if not frame_b64:
-        await ctx.send(
-            "Прикрепи скриншот или укажи URL. Пример:\n"
-            "`!demo https://i.imgur.com/xxx.png`\n"
-            "или отправь `!demo` с прикреплённым изображением."
-        )
+    # --- Если передали скриншот — анализируем ---
+    if frame_b64:
+        screen_capture._last_frame = frame_b64
+        # Если режим ещё не включён — включаем заодно
+        if not screen_capture.is_running:
+            screen_capture.start()
+        await ctx.send("🖼️ Анализирую...")
+        await handle_screen_comment(frame_b64)
+        log.info(f"[DEMO] Screenshot analyzed from {ctx.author.display_name}")
         return
 
-    # Сохраняем кадр и запускаем анализ
-    screen_capture._last_frame = frame_b64
-    await ctx.send("🖼️ Анализирую скриншот...")
-    await handle_screen_comment(frame_b64)
-    log.info(f"[DEMO] Analyzed screenshot from {ctx.author.display_name}")
+    # --- Без аргументов — тоглим режим наблюдения ---
+    if screen_capture.is_running:
+        _stop_demo_mode(announce=False)
+        await ctx.send("👁️ Режим демо **выключен**.")
+        tts_engine.feed("Больше не слежу за экраном.")
+        voice_player.mark_done()
+    else:
+        await _start_demo_mode()
+        await ctx.send(
+            f"👁️ Режим демо **включён** (кадр каждые {config.SCREEN_CAPTURE_INTERVAL}с).\n"
+            "Начни Go Live в Discord или скинь скрин — прокомментирую."
+        )
 
 
 @bot.command(name="mc_join")
