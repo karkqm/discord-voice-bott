@@ -1,8 +1,14 @@
 import asyncio
+import sys
 import os
 import re
 import threading
 import time
+
+# Фикс для Windows: ProactorEventLoop глючит с aiohttp/SSL
+# Переключаемся на SelectorEventLoop который работает стабильно
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 from typing import Optional
 
 import discord
