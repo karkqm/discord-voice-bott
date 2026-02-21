@@ -82,13 +82,23 @@ echo.
 :: Install PyTorch — выбираем версию по Compute Capability GPU
 set PYTORCH_INSTALLED=0
 if "!HAS_NVIDIA!"=="1" (
-    :: Получаем compute capability (например "6.1", "8.6", "12.0")
+    :: Получаем compute capability из verbose вывода nvidia-smi (надёжнее чем --query-gpu=compute_cap)
+    :: Формат строки: "    CUDA Compute Capability  : 6.1"
     set CC_MAJOR=0
     set CC_MINOR=0
-    for /f "tokens=*" %%g in ('nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2^>nul') do (
-        for /f "tokens=1,2 delims=." %%m in ("%%g") do (
+    for /f "tokens=4" %%v in ('nvidia-smi -q 2^>nul ^| findstr /i "Compute Capability"') do (
+        for /f "tokens=1,2 delims=." %%m in ("%%v") do (
             set CC_MAJOR=%%m
             set CC_MINOR=%%n
+        )
+    )
+    :: Запасной вариант если verbose не помог — через python
+    if "!CC_MAJOR!"=="0" (
+        for /f "tokens=*" %%g in ('python -c "import subprocess,re; o=subprocess.run([\"nvidia-smi\",\"--query-gpu=compute_cap\",\"--format=csv,noheader\"],capture_output=True,text=True).stdout.strip(); p=re.match(r\"(\d+)\.(\d+)\",o); print(p.group(1)+\" \"+p.group(2)) if p else print(\"0 0\")" 2^>nul') do (
+            for /f "tokens=1,2" %%a in ("%%g") do (
+                set CC_MAJOR=%%a
+                set CC_MINOR=%%b
+            )
         )
     )
     echo [i] GPU Compute Capability: !CC_MAJOR!.!CC_MINOR!
