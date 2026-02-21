@@ -79,26 +79,52 @@ if %errorlevel% equ 0 (
 )
 echo.
 
-:: Install PyTorch
+:: Install PyTorch — выбираем версию по Compute Capability GPU
 set PYTORCH_INSTALLED=0
 if "!HAS_NVIDIA!"=="1" (
-    :: Check CUDA compute capability - sm_120+ = Blackwell (RTX 50xx)
-    set IS_RTX50=0
+    :: Получаем compute capability (например "6.1", "8.6", "12.0")
+    set CC_MAJOR=0
+    set CC_MINOR=0
     for /f "tokens=*" %%g in ('nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2^>nul') do (
-        for /f "tokens=1 delims=." %%m in ("%%g") do (
-            if %%m GEQ 12 set IS_RTX50=1
+        for /f "tokens=1,2 delims=." %%m in ("%%g") do (
+            set CC_MAJOR=%%m
+            set CC_MINOR=%%n
         )
     )
-    if "!IS_RTX50!"=="1" (
-        echo [*] Blackwell GPU detected ^(compute_cap 12+^) - installing PyTorch nightly with CUDA 12.8...
-        pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 --force-reinstall
+    echo [i] GPU Compute Capability: !CC_MAJOR!.!CC_MINOR!
+
+    if !CC_MAJOR! GEQ 12 (
+        :: Blackwell RTX 50xx — нужен PyTorch nightly CUDA 12.8
+        echo [*] Blackwell GPU ^(CC !CC_MAJOR!.!CC_MINOR!^) — PyTorch nightly CUDA 12.8...
+        pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 --quiet
         set PYTORCH_INSTALLED=1
-        echo [OK] PyTorch nightly CUDA 12.8 installed
-    ) else (
-        echo [*] Installing PyTorch with CUDA 12.1...
+        echo [OK] PyTorch nightly CUDA 12.8
+    ) else if !CC_MAJOR! GEQ 8 (
+        :: RTX 30xx / RTX 40xx — CUDA 12.1
+        echo [*] Modern GPU ^(CC !CC_MAJOR!.!CC_MINOR!^) — PyTorch CUDA 12.1...
         pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 --quiet
         set PYTORCH_INSTALLED=1
-        echo [OK] PyTorch CUDA 12.1 installed
+        echo [OK] PyTorch CUDA 12.1
+    ) else if !CC_MAJOR! GEQ 7 (
+        :: RTX 20xx / GTX 16xx — CUDA 11.8 (PyTorch 2.1.2 поддерживает CC 7.x)
+        echo [*] Turing GPU ^(CC !CC_MAJOR!.!CC_MINOR!^) — PyTorch 2.1.2 CUDA 11.8...
+        pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu118 --quiet
+        set PYTORCH_INSTALLED=1
+        echo [OK] PyTorch 2.1.2 CUDA 11.8
+    ) else if !CC_MAJOR! GEQ 6 (
+        :: GTX 10xx / GTX 16xx Pascal — CUDA 11.8 (последний поддерживающий CC 6.x)
+        echo [*] Pascal GPU ^(CC !CC_MAJOR!.!CC_MINOR!^) — PyTorch 2.1.2 CUDA 11.8...
+        echo [i] GTX 10xx поддерживается PyTorch до версии 2.1.x ^(CUDA 11.8^)
+        pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu118 --quiet
+        set PYTORCH_INSTALLED=1
+        echo [OK] PyTorch 2.1.2 CUDA 11.8
+    ) else (
+        :: Очень старый GPU — CC < 6.0, только CPU
+        echo [!] GPU слишком старый ^(CC !CC_MAJOR!.!CC_MINOR!^), CUDA не поддерживается
+        echo [*] Устанавливаю PyTorch CPU...
+        pip install torch torchvision torchaudio --quiet
+        set PYTORCH_INSTALLED=1
+        echo [OK] PyTorch CPU
     )
 )
 if "!PYTORCH_INSTALLED!"=="0" (
@@ -132,13 +158,23 @@ if not exist ".env" (
     copy .env.example .env >nul
     echo [!] Edit .env - set your DISCORD_BOT_TOKEN and OPENAI_API_KEY
     echo.
-    if "%HAS_NVIDIA%"=="1" (
-        echo [i] NVIDIA GPU detected - recommended: STT_BACKEND=realtime
-        echo     Best quality: STT_MODEL=large-v3
-        echo     Fast start:   STT_MODEL=base
+    if "!HAS_NVIDIA!"=="1" (
+        if !CC_MAJOR! GEQ 6 (
+            echo [i] NVIDIA GPU ^(CC !CC_MAJOR!.!CC_MINOR!^) — рекомендуется:
+            echo     STT_BACKEND=realtime
+            echo     STT_MODEL=large-v3-turbo
+            echo     GPU_BACKEND=cuda
+        ) else (
+            echo [i] Старый NVIDIA GPU — рекомендуется CPU режим:
+            echo     STT_BACKEND=realtime
+            echo     STT_MODEL=base
+            echo     GPU_BACKEND=cpu
+        )
     ) else (
-        echo [i] No NVIDIA - recommended: STT_BACKEND=onnx
+        echo [i] Нет NVIDIA — рекомендуется AMD/CPU режим:
+        echo     STT_BACKEND=onnx
         echo     STT_MODEL=onnx-community/whisper-base
+        echo     GPU_BACKEND=rocm
     )
 ) else (
     echo [OK] .env already exists
