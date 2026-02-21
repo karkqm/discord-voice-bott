@@ -7,6 +7,19 @@ echo   Discord Voice Bot - Auto Setup
 echo ============================================
 echo.
 
+:: Auto-update from git
+where git >nul 2>&1
+if %errorlevel% equ 0 (
+    echo [*] Pulling latest updates...
+    git pull --quiet 2>nul
+    if %errorlevel% equ 0 (
+        echo [OK] Up to date
+    ) else (
+        echo [i] git pull skipped (not a git repo or no remote)
+    )
+)
+echo.
+
 :: Check Python
 where py >nul 2>&1
 if %errorlevel% neq 0 (
@@ -82,24 +95,14 @@ echo.
 :: Install PyTorch — выбираем версию по Compute Capability GPU
 set PYTORCH_INSTALLED=0
 if "!HAS_NVIDIA!"=="1" (
-    :: Получаем compute capability из verbose вывода nvidia-smi (надёжнее чем --query-gpu=compute_cap)
-    :: Формат строки: "    CUDA Compute Capability  : 6.1"
+    :: Получаем compute capability через Python — надёжно, без хрупкого batch-парсинга
     set CC_MAJOR=0
     set CC_MINOR=0
-    for /f "tokens=4" %%v in ('nvidia-smi -q 2^>nul ^| findstr /i "Compute Capability"') do (
-        for /f "tokens=1,2 delims=." %%m in ("%%v") do (
-            set CC_MAJOR=%%m
-            set CC_MINOR=%%n
-        )
-    )
-    :: Запасной вариант если verbose не помог — через python
-    if "!CC_MAJOR!"=="0" (
-        for /f "tokens=*" %%g in ('python -c "import subprocess,re; o=subprocess.run([\"nvidia-smi\",\"--query-gpu=compute_cap\",\"--format=csv,noheader\"],capture_output=True,text=True).stdout.strip(); p=re.match(r\"(\d+)\.(\d+)\",o); print(p.group(1)+\" \"+p.group(2)) if p else print(\"0 0\")" 2^>nul') do (
-            for /f "tokens=1,2" %%a in ("%%g") do (
-                set CC_MAJOR=%%a
-                set CC_MINOR=%%b
-            )
-        )
+    set _PY_CC=
+    for /f "usebackq delims=" %%g in (`python -c "import subprocess,re; o=subprocess.run(['nvidia-smi','-q'],capture_output=True,text=True).stdout; m=re.search(r'Compute Capability\s*:\s*(\d+)\.(\d+)',o); print(m.group(1)+' '+m.group(2) if m else '0 0')" 2^>nul`) do set _PY_CC=%%g
+    for /f "tokens=1,2" %%a in ("!_PY_CC!") do (
+        set CC_MAJOR=%%a
+        set CC_MINOR=%%b
     )
     echo [i] GPU Compute Capability: !CC_MAJOR!.!CC_MINOR!
 
