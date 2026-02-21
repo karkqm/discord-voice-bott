@@ -144,10 +144,28 @@ if "!PYTORCH_INSTALLED!"=="0" (
 )
 echo.
 
-:: Install main dependencies
+:: Install main dependencies (torch может подтянуться через RealtimeSTT и др. — перепинуем ниже)
 echo [*] Installing dependencies...
 pip install -r requirements.txt --quiet
 echo [OK] Dependencies installed
+echo.
+
+:: Переустанавливаем PyTorch поверх того что могли затянуть зависимости
+echo [*] Pinning correct PyTorch version for this GPU...
+if "!HAS_NVIDIA!"=="1" (
+    if !CC_MAJOR! GEQ 12 (
+        pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 --quiet
+    ) else if !CC_MAJOR! GEQ 8 (
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 --quiet
+    ) else if !CC_MAJOR! GEQ 6 (
+        pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu118 --quiet
+    ) else (
+        pip install torch torchvision torchaudio --quiet
+    )
+) else (
+    pip install torch torchvision torchaudio --quiet
+)
+echo [OK] PyTorch pinned
 echo.
 
 :: Silero TTS downloads model automatically on first run
